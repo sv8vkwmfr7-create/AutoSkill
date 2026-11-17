@@ -58,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     p_eval.add_argument("--skip-seed", action="store_true", help="跳过种子技能生成（池已就绪时）")
     p_eval.add_argument("--out", default=None, help="报告输出目录（默认 eval/）")
 
+    sub.add_parser("selfcheck", help="一键功能自检（六项核心链路）")
+
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
 
@@ -66,10 +68,23 @@ def main(argv: list[str] | None = None) -> int:
 
         from .api import create_app
 
-        uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info")
+        try:
+            app = create_app()
+        except RuntimeError as e:  # 配置缺失等启动错误：给出可读信息而非裸栈
+            print(f"启动失败: {e}", file=sys.stderr)
+            return 2
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
         return 0
 
     from .service import AutoSkillService
+
+    if args.cmd == "selfcheck":
+        from .selfcheck import run_selfcheck
+
+        # 不传生产服务：selfcheck 在独立临时技能池上运行（幂等、不污染生产数据）
+        summary = run_selfcheck()
+        _print(summary)
+        return 0 if summary["ok"] else 1
 
     svc = AutoSkillService()
 
@@ -102,6 +117,14 @@ def main(argv: list[str] | None = None) -> int:
         reply = Agent(svc).chat(args.message)
         _print(reply.as_dict())
         return 0
+
+    if args.cmd == "selfcheck":
+        from .selfcheck import run_selfcheck
+
+        # 不传生产服务：selfcheck 在独立临时技能池上运行（幂等、不污染生产数据）
+        summary = run_selfcheck()
+        _print(summary)
+        return 0 if summary["ok"] else 1
 
     if args.cmd == "eval":
         from .evaluation import run_eval

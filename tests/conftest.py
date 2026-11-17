@@ -13,22 +13,29 @@ from autoskill.vectorstore import VecHit  # noqa: E402
 
 
 class FakeLLM:
-    """脚本化 LLM：chat_json 按顺序弹出预设回复；脚本项为异常对象时抛出。"""
+    """脚本化 LLM：chat_json 按顺序弹出预设回复；脚本耗尽后回落 default（并发测试用）；
+    脚本项为异常对象时抛出。"""
 
     name = "fake"
 
-    def __init__(self, script=None):
+    def __init__(self, script=None, default=None):
+        import copy
+
         self.script = list(script or [])
+        self.default = default
+        self._copy = copy
         self.calls = []
 
     def chat_json(self, system, user, temperature=None, max_tokens=4000):
         self.calls.append({"system": system, "user": user})
-        if not self.script:
-            raise AssertionError("FakeLLM 脚本耗尽（收到意外调用）")
-        item = self.script.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
+        if self.script:
+            item = self.script.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        if self.default is not None:
+            return self._copy.deepcopy(self.default)
+        raise AssertionError("FakeLLM 脚本耗尽（收到意外调用）")
 
     def chat_text(self, system, user, temperature=None, max_tokens=4000):
         raise NotImplementedError

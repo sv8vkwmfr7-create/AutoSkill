@@ -54,8 +54,9 @@ python -m autoskill skills
 | `python -m autoskill agent "<消息>"` | 单轮 Agent 对话（展示工具调用过程） |
 | `python -m autoskill rebuild` | 手动重建注册表 + 向量库对账 |
 | `python -m autoskill eval` | 批量评测（35 条人工期望值），输出 `eval/report.md` |
+| `python -m autoskill selfcheck` | 一键功能自检（六项核心链路，独立临时池、幂等） |
 
-HTTP API：`POST /ensure`、`POST /skills/{name}/call`、`GET /skills`、`POST /agent/chat`、`GET /health`。
+HTTP API：`POST /ensure`、`POST /skills/{name}/call`、`GET /skills`、`GET /skills/{name}`、`GET /events`、`POST /agent/chat`、`GET /health`。
 
 ## 评测
 
@@ -67,9 +68,12 @@ python -m autoskill eval          # 种子 10 + 池内改述 10 + 池外生成 1
 - 最新实测结果见 [eval/report.md](eval/report.md)；四个验收指标：池外生成成功率 ≥85%、池内路由正确率 ≥90%、静默失败 =0、白名单拦截 100%
 - 验收标准全文见[《最终目标与达标要求》](最终目标与达标要求.md)
 
-## 架构
+## 架构与工程化
 
-四层架构与关键设计取舍（为什么不用 importlib 热加载、为什么 LLM 裁决代替阈值、单测同源怎么办）见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；面试高频问题见 [docs/qa.md](docs/qa.md)。
+- 架构与设计取舍：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；面试高频问题：[docs/qa.md](docs/qa.md)；现场演示：[docs/DEMO.md](docs/DEMO.md)
+- **部署运维手册**（直跑 / Docker 沙箱两种拓扑、systemd、备份恢复）：[docs/DEPLOY.md](docs/DEPLOY.md)
+- **工程级落地自评报告**（八维度实测证据与边界声明）：[docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md)
+- 工程化能力：并发安全（生成锁 + 双检路由）、事件审计轨迹（`/events`）、启动配置校验（快速失败）、全局异常结构化、`pyproject.toml` 打包（`autoskill` 命令）、Dockerfile（构建期跑测试）、GitHub Actions CI、一键自检 `selfcheck`（独立临时池、幂等）
 
 ## 目录结构
 
@@ -81,7 +85,7 @@ autoskill/            核心包
   ast_guard.py        AST import 白名单 + builtin 黑名单
   registry.py         技能注册表 + 熔断状态机（磁盘为准，重启重建）
   router.py           向量召回 + LLM 终审裁决
-  executor/           可插拔执行器（local / docker 接口桩）
+  executor/           可插拔执行器（local 五层沙箱 / docker 容器隔离）
   runner.py           子进程 runner（stdin/stdout JSON 协议）
   vectorstore.py      向量技能池（Chroma 优先，numpy 兜底）
   embeddings.py       向量化（provider / 本地 bigram-hash）
@@ -91,7 +95,7 @@ autoskill/            核心包
 eval/evalset.json     评测集（人工期望值，冻结）
 skills/               技能库（运行时生成：<name>/v{n}/impl.py + skill.json）
 docs/                 架构文档 / 面试 Q&A
-tests/                pytest（66 用例，全离线）
+tests/                pytest（94 用例，全离线）
 ```
 
 ## 已知限制（MVP 边界）

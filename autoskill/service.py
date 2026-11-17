@@ -6,11 +6,18 @@
       未命中 -> 技能生成（四层校验 + ≤3 轮自修正） -> 入库 + 热加载注册 -> 参数提取 -> 执行 -> 返回
     熔断自修复（G1-3）：技能连续失败 N 次 -> quarantined（路由排除）->
       下一次同类需求 -> 高相似隔离技能检测 -> 以同名生成 v2 -> 校验通过热替换回 active
+
+工程化保障：
+- 并发安全：全局生成锁 + 获锁后二次路由（防止并发 ensure 对同一意图重复生成）
+- 可观测性：data/events.jsonl 事件审计轨迹（ensure/call/rebuild 全量记录）
+- 快速失败：启动时校验 LLM 配置，缺失即报可读错误
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -76,6 +83,12 @@ class CallResult:
 class AutoSkillService:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings.load()
+        # 快速失败：LLM 配置缺失时给出可读错误，而不是运行期神秘失败
+        if not self.settings.llm_base_url or not self.settings.llm_api_key:
+            raise RuntimeError(
+                "LLM 未配置：请在项目根目录 .env 中设置 AUTOSKILL_LLM_BASE_URL 与 "
+                "AUTOSKILL_LLM_API_KEY（模板见 .env.example），或通过环境变量注入"
+            )
         self.settings.skills_dir.mkdir(parents=True, exist_ok=True)
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
         self.llm = LLMClient(self.settings)
@@ -85,6 +98,11 @@ class AutoSkillService:
         self.registry = SkillRegistry(self.settings.skills_dir, breaker_threshold=self.settings.breaker_threshold)
         self.router = Router(self.registry, self.store, self.embedder, self.llm, self.settings)
         self.generator = Generator(self.llm, self.executor, self.settings)
+        # 并发控制：全局生成锁（防并发 ensure 对同一意图重复生成；召回/调用不受影响）
+        self._generation_lock = threading.Lock()
+        # 事件审计轨迹（JSONL，线程安全）
+        self._events_path = self.settings.data_dir / "events.jsonl"
+        self._events_lock = threading.Lock()
         logger.info(
             "服务就绪: llm=%s store=%s embedding=%s executor=%s skills=%d",
             self.settings.llm_model,
@@ -93,6 +111,29 @@ class AutoSkillService:
             self.executor.name,
             len(self.registry.names()),
         )
+
+    # ---- 事件审计轨迹 -----------------------------------------------------------
+    def _log_event(self, kind: str, **fields: Any) -> None:
+        try:
+            record = {"ts": round(time.time(), 3), "kind": kind, **fields}
+            with self._events_lock:
+                with open(self._events_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        except Exception:  # noqa: BLE001 - 观测失败不阻塞业务
+            logger.debug("事件日志写入失败", exc_info=True)
+
+    def events(self, limit: int = 100) -> list[dict]:
+        """读取最近 limit 条事件（最新在后）。"""
+        if not self._events_path.exists():
+            return []
+        lines = self._events_path.read_text(encoding="utf-8").strip().splitlines()
+        out = []
+        for line in lines[-limit:]:
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return out
 
     # ---- 重启重建 -----------------------------------------------------------
     def set_llm(self, llm) -> None:
@@ -118,6 +159,7 @@ class AutoSkillService:
             "removed_orphans": len(orphans),
             "store": self.store.backend_name(),
         }
+        self._log_event("rebuild", **report)
         logger.info("重建完成: %s", report)
         return report
 
@@ -140,160 +182,213 @@ class AutoSkillService:
     def call(self, name: str, params: dict) -> CallResult:
         meta = self.registry.get(name)
         if meta is None:
-            return CallResult(ok=False, skill=name, error=f"技能不存在: {name}")
+            result = CallResult(ok=False, skill=name, error=f"技能不存在: {name}")
+            self._log_event("call", **result.as_dict())
+            return result
         if meta.status == QUARANTINED:
-            return CallResult(
+            result = CallResult(
                 ok=False,
                 skill=name,
                 error=f"技能已熔断隔离（连续失败 {meta.fail_streak} 次），等待自修复升级",
             )
+            self._log_event("call", **result.as_dict())
+            return result
         ok, err = validate_params(params, meta.params_schema)
         if not ok:
-            return CallResult(ok=False, skill=name, error=err)
+            result = CallResult(ok=False, skill=name, error=err)
+            self._log_event("call", **result.as_dict())
+            return result
         exec_res = self._execute(meta, params)
         if exec_res.ok:
             self.registry.record_success(name)
-            return CallResult(ok=True, skill=name, output=exec_res.data, duration_s=exec_res.duration_s)
-        self._after_failure(meta, exec_res.error)
-        return CallResult(ok=False, skill=name, error=exec_res.error, duration_s=exec_res.duration_s)
+            result = CallResult(ok=True, skill=name, output=exec_res.data, duration_s=exec_res.duration_s)
+        else:
+            self._after_failure(meta, exec_res.error)
+            result = CallResult(ok=False, skill=name, error=exec_res.error, duration_s=exec_res.duration_s)
+        self._log_event("call", **result.as_dict())
+        return result
 
     # ---- 全链路 ensure -----------------------------------------------------------
     def ensure(self, requirement: str) -> EnsureResult:
         requirement = (requirement or "").strip()
         if not requirement:
-            return EnsureResult(ok=False, path="rejected", error="需求为空")
+            result = EnsureResult(ok=False, path="rejected", error="需求为空")
+            self._log_event("ensure", **result.as_dict())
+            return result
 
         t0 = time.monotonic()
         timings: dict[str, float] = {}
         detail: dict[str, Any] = {}
-
-        # 1) 召回 + 裁决
-        route: RouteResult | None = None
-        router_error = ""
-        t = time.monotonic()
         try:
-            route = self.router.route(requirement)
-        except RouterError as e:
-            router_error = str(e)
-            logger.warning("路由失败，走生成路径: %s", e)
-        timings["route_s"] = time.monotonic() - t
-        detail["route_reason"] = route.reason if route else router_error
-        detail["candidates"] = route.candidates if route else []
+            result = self._ensure_inner(requirement, t0, timings, detail)
+        except Exception as e:  # noqa: BLE001 - 记录后向上抛（API 层结构化）
+            self._log_event("ensure", ok=False, error=str(e)[:300],
+                            elapsed_s=round(time.monotonic() - t0, 3))
+            raise
+        self._log_event(
+            "ensure", ok=result.ok, path=result.path, skill=result.skill,
+            rounds=result.rounds, error=(result.error or "")[:200],
+            elapsed_s=round(result.elapsed_s.get("total_s", 0.0), 3),
+        )
+        return result
 
-        # 2) 命中 -> 参数预校验 -> 执行
-        if route and route.hit:
-            meta = self.registry.get(route.skill)
-            if meta is not None and meta.status == ACTIVE:
-                params, arg_err = self._extract_args(requirement, meta, route.params)
-                detail["arg_fix_used"] = arg_err is not None and params is not None
-                if params is None:
-                    return EnsureResult(
-                        ok=False,
-                        path="recall",
-                        skill=meta.name,
-                        error=f"召回命中 {meta.name}，但参数构造失败: {arg_err}",
-                        rounds=0,
-                        elapsed_s=self._elapsed(t0, timings),
-                        detail=detail,
-                    )
-                exec_res = self._execute(meta, params)
-                timings["exec_s"] = exec_res.duration_s
-                if exec_res.ok:
-                    self.registry.record_success(meta.name)
-                    return EnsureResult(
-                        ok=True,
-                        path="recall",
-                        skill=meta.name,
-                        output=exec_res.data,
-                        elapsed_s=self._elapsed(t0, timings),
-                        detail=detail,
-                    )
-                # 命中技能执行失败：熔断计数 +1，转入生成路径（自修复触发点之一）
+    def _ensure_inner(self, requirement: str, t0: float, timings: dict, detail: dict) -> EnsureResult:
+        # 1) 召回 + 裁决
+        tried_skills: set[str] = set()  # 本轮已尝试且执行失败的技能（复核时跳过）
+        route = self._safe_route(requirement, timings, detail, key="route_s")
+        result = self._attempt_recall(requirement, route, timings, detail, t0, tried_skills)
+        if result is not None:
+            return result
+
+        # 2) 生成路径（全局生成锁 + 获锁后二次路由：并发 ensure 不会重复生成同一意图）
+        with self._generation_lock:
+            recheck = self._safe_route(requirement, timings, detail, key="recheck_s")
+            if recheck is not None:
+                result = self._attempt_recall(requirement, recheck, timings, detail, t0, tried_skills)
+                if result is not None:
+                    detail["recall_after_recheck"] = True
+                    return result
+
+            # 2.1) 未命中 -> 检测高相似隔离技能（熔断自修复入口）
+            # 规则：top-k 中存在 quarantined 技能且相似度过召回下限，即视为同一意图，
+            # 触发同名 v2 升级（本地哈希 embedding 的绝对相似度偏低，故不用固定高阈值）
+            target_name = None
+            active_route = recheck or route
+            if active_route is not None:
+                embedding = self.embedder.embed([requirement])[0]
+                for h in self.store.query(embedding, k=self.settings.top_k, where=None):
+                    meta = self.registry.get(h.id)
+                    if meta is not None and meta.status == QUARANTINED and h.sim >= self.settings.min_candidate_sim:
+                        target_name = meta.name
+                        detail["repair_target"] = meta.name
+                        detail["repair_sim"] = round(h.sim, 4)
+                        logger.info("命中隔离技能 %s (sim=%.3f)，触发生成修复 v2", meta.name, h.sim)
+                        break
+
+            # 2.2) 生成（四层校验 + 自修正）
+            t = time.monotonic()
+            gen = self.generator.generate(requirement, target_name=target_name)
+            timings["generate_s"] = time.monotonic() - t
+            detail["generate_kind"] = gen.error_kind
+            detail["generate_violations"] = gen.violations
+            if not gen.ok:
+                reason = "生成失败（能力边界或质量门禁未过）"
+                if gen.error_kind == "guard":
+                    reason = "需求超出技能能力边界：违反 import 白名单/安全约束，已被静态检查拒绝"
+                return EnsureResult(
+                    ok=False,
+                    path="rejected",
+                    error=f"{reason}: {gen.error[:500]}",
+                    rounds=max(gen.rounds - 1, 0),
+                    elapsed_s=self._elapsed(t0, timings),
+                    detail=detail,
+                )
+
+            meta = self.registry.register(
+                name=gen.skill.name,
+                description=gen.skill.description,
+                tags=gen.skill.tags,
+                params_schema=gen.skill.params,
+                impl_code=gen.skill.impl_code,
+                tests=gen.skill.tests,
+                note=("auto-repair v2" if target_name else "auto-generated"),
+            )
+            self._index_skill(meta)
+            detail["version"] = meta.version
+
+            # 2.3) 参数提取 -> 执行
+            params, arg_err = self._extract_args(requirement, meta, None)
+            if params is None:
+                return EnsureResult(
+                    ok=False,
+                    path="generated",
+                    skill=meta.name,
+                    error=f"技能已生成入库（v{meta.version}），但参数提取失败: {arg_err}",
+                    rounds=max(gen.rounds - 1, 0),
+                    elapsed_s=self._elapsed(t0, timings),
+                    detail=detail,
+                )
+            exec_res = self._execute(meta, params)
+            timings["exec_s"] = exec_res.duration_s
+            if not exec_res.ok:
                 self._after_failure(meta, exec_res.error)
-                detail["recall_failure"] = exec_res.error[:300]
-                logger.warning("召回技能执行失败 %s: %s -> 转生成路径", meta.name, exec_res.error[:150])
-
-        # 3) 未命中 -> 检测高相似隔离技能（熔断自修复入口）
-        # 规则：top-k 中存在 quarantined 技能且相似度过召回下限，即视为同一意图，
-        # 触发同名 v2 升级（本地哈希 embedding 的绝对相似度偏低，故不用固定高阈值）
-        target_name = None
-        if route is not None:
-            embedding = self.embedder.embed([requirement])[0]
-            for h in self.store.query(embedding, k=self.settings.top_k, where=None):
-                meta = self.registry.get(h.id)
-                if meta is not None and meta.status == QUARANTINED and h.sim >= self.settings.min_candidate_sim:
-                    target_name = meta.name
-                    detail["repair_target"] = meta.name
-                    detail["repair_sim"] = round(h.sim, 4)
-                    logger.info("命中隔离技能 %s (sim=%.3f)，触发生成修复 v2", meta.name, h.sim)
-                    break
-
-        # 4) 生成（四层校验 + 自修正）
-        t = time.monotonic()
-        gen = self.generator.generate(requirement, target_name=target_name)
-        timings["generate_s"] = time.monotonic() - t
-        detail["generate_kind"] = gen.error_kind
-        detail["generate_violations"] = gen.violations
-        if not gen.ok:
-            reason = "生成失败（能力边界或质量门禁未过）"
-            if gen.error_kind == "guard":
-                reason = "需求超出技能能力边界：违反 import 白名单/安全约束，已被静态检查拒绝"
+                return EnsureResult(
+                    ok=False,
+                    path="generated",
+                    skill=meta.name,
+                    error=f"技能已生成入库（v{meta.version}）但执行失败: {exec_res.error[:300]}",
+                    rounds=max(gen.rounds - 1, 0),
+                    elapsed_s=self._elapsed(t0, timings),
+                    detail=detail,
+                )
+            self.registry.record_success(meta.name)
             return EnsureResult(
-                ok=False,
-                path="rejected",
-                error=f"{reason}: {gen.error[:500]}",
+                ok=True,
+                path="generated",
+                skill=meta.name,
+                output=exec_res.data,
                 rounds=max(gen.rounds - 1, 0),
                 elapsed_s=self._elapsed(t0, timings),
                 detail=detail,
             )
 
-        meta = self.registry.register(
-            name=gen.skill.name,
-            description=gen.skill.description,
-            tags=gen.skill.tags,
-            params_schema=gen.skill.params,
-            impl_code=gen.skill.impl_code,
-            tests=gen.skill.tests,
-            note=("auto-repair v2" if target_name else "auto-generated"),
-        )
-        self._index_skill(meta)
-        detail["version"] = meta.version
+    def _safe_route(self, requirement: str, timings: dict, detail: dict, key: str = "route_s") -> RouteResult | None:
+        """路由（任何失败返回 None 并降级到生成路径——路由基础设施故障不击穿主链路）。"""
+        t = time.monotonic()
+        route: RouteResult | None = None
+        router_error = ""
+        try:
+            route = self.router.route(requirement)
+        except Exception as e:  # noqa: BLE001 - 路由失败必须降级而非中断
+            router_error = f"{type(e).__name__}: {e}"
+            logger.warning("路由失败，走生成路径: %s", e)
+        timings[key] = time.monotonic() - t
+        if key == "route_s":
+            detail["route_reason"] = route.reason if route else router_error
+            detail["candidates"] = route.candidates if route else []
+        return route
 
-        # 5) 参数提取 -> 执行
-        params, arg_err = self._extract_args(requirement, meta, None)
+    def _attempt_recall(self, requirement: str, route: RouteResult | None, timings: dict, detail: dict, t0: float, skip: set | None = None) -> EnsureResult | None:
+        """召回路径：命中即执行。返回 None 表示未命中或执行失败（转生成路径）。
+        skip：本轮已失败过的技能，复核路由时跳过（避免重复执行同一坏技能）。"""
+        if route is None or not route.hit:
+            return None
+        if skip and route.skill in skip:
+            return None
+        meta = self.registry.get(route.skill)
+        if meta is None or meta.status != ACTIVE:
+            return None
+        params, arg_err = self._extract_args(requirement, meta, route.params)
+        detail["arg_fix_used"] = arg_err is not None and params is not None
         if params is None:
             return EnsureResult(
                 ok=False,
-                path="generated",
+                path="recall",
                 skill=meta.name,
-                error=f"技能已生成入库（v{meta.version}），但参数提取失败: {arg_err}",
-                rounds=max(gen.rounds - 1, 0),
+                error=f"召回命中 {meta.name}，但参数构造失败: {arg_err}",
+                rounds=0,
                 elapsed_s=self._elapsed(t0, timings),
                 detail=detail,
             )
         exec_res = self._execute(meta, params)
         timings["exec_s"] = exec_res.duration_s
-        if not exec_res.ok:
-            self._after_failure(meta, exec_res.error)
+        if exec_res.ok:
+            self.registry.record_success(meta.name)
             return EnsureResult(
-                ok=False,
-                path="generated",
+                ok=True,
+                path="recall",
                 skill=meta.name,
-                error=f"技能已生成入库（v{meta.version}）但执行失败: {exec_res.error[:300]}",
-                rounds=max(gen.rounds - 1, 0),
+                output=exec_res.data,
                 elapsed_s=self._elapsed(t0, timings),
                 detail=detail,
             )
-        self.registry.record_success(meta.name)
-        return EnsureResult(
-            ok=True,
-            path="generated",
-            skill=meta.name,
-            output=exec_res.data,
-            rounds=max(gen.rounds - 1, 0),
-            elapsed_s=self._elapsed(t0, timings),
-            detail=detail,
-        )
+        # 命中技能执行失败：熔断计数 +1，转生成路径（自修复触发点之一）
+        self._after_failure(meta, exec_res.error)
+        if skip is not None:
+            skip.add(route.skill)
+        detail["recall_failure"] = exec_res.error[:300]
+        logger.warning("召回技能执行失败 %s: %s -> 转生成路径", meta.name, exec_res.error[:150])
+        return None
 
     # ---- 内部 -----------------------------------------------------------
     def _execute(self, meta, params: dict):
@@ -354,6 +449,4 @@ class AutoSkillService:
 
 
 def json_dumps(obj) -> str:
-    import json
-
     return json.dumps(obj, ensure_ascii=False, default=str)

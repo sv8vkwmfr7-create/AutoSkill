@@ -1,0 +1,2 @@
+[console_scripts]
+autoskill = autoskill.__main__:main
