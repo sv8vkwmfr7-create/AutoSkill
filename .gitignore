@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+chroma/
+.pytest_cache/
+.pytest_tmp/
+skills/
+!skills/.gitkeep
+serve*.log
+eval_run*.log
