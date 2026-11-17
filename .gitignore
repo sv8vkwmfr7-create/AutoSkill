@@ -10,3 +10,4 @@ skills/
 !skills/.gitkeep
 serve*.log
 eval_run*.log
+autoskill.egg-info/
