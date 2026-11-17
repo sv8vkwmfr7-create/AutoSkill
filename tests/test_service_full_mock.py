@@ -58,6 +58,31 @@ class TestGenerationPipeline:
         assert "白名单" in r.error or "能力边界" in r.error
         assert svc.registry.names() == []
 
+    def test_random_output_with_check_tests(self, tmp_path):
+        """随机性技能：tests 用 _check 断言而非固定值（v5 教训：LLM 写死随机值会自测必败）。"""
+        skill = {
+            "name": "gen_token",
+            "description": "生成随机令牌 token，只含英文字母与数字",
+            "tags": ["random"],
+            "params": {"type": "object", "properties": {"length": {"type": "integer"}}, "required": ["length"]},
+            "impl_code": (
+                "import secrets\n\n"
+                "def run(params):\n"
+                "    alphabet = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'\n"
+                "    return ''.join(secrets.choice(alphabet) for _ in range(params['length']))\n"
+            ),
+            "tests": [
+                {"input": {"length": 16}, "expected": {"_check": {"type_is": "str", "length_eq": 16, "regex": "^[A-Za-z0-9]+$"}}},
+                {"input": {"length": 8}, "expected": {"_check": {"type_is": "str", "length_eq": 8, "regex": "^[A-Za-z0-9]+$"}}},
+                {"input": {"length": 12}, "expected": {"_check": {"type_is": "str", "length_eq": 12, "regex": "^[A-Za-z0-9]+$"}}},
+            ],
+        }
+        fake = FakeLLM([skill, {"params": {"length": 16}}])
+        svc = make_service(tmp_path, llm=fake)
+        r = svc.ensure("生成一个 16 位随机令牌")
+        assert r.ok, r.error
+        assert len(r.output) == 16
+
     def test_capability_boundary_honest_refusal(self, tmp_path):
         # 生成器学会说不：LLM 返回 {"reject": true, ...} -> 终态拒绝，不再自修正
         fake = FakeLLM([{"reject": True, "reason": "该需求需要发起真实网络请求，超出纯计算技能边界"}])

@@ -14,37 +14,16 @@ import datetime as _dt
 import json
 import logging
 import platform
-import re
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from .config import PROJECT_ROOT, Settings
-from .schemas import values_equal
+from .schemas import match_expected as _match
 from .service import AutoSkillService
 
 logger = logging.getLogger("autoskill.evaluation")
-
-
-def _match(value: Any, expected: Any) -> bool:
-    """期望值匹配：精确值比较，或 _check 谓词（type_is / length_eq / regex / contains_all）。"""
-    if isinstance(expected, dict) and "_check" in expected:
-        checks = expected["_check"]
-        if "type_is" in checks and type(value).__name__ != checks["type_is"]:
-            return False
-        if "length_eq" in checks and (not hasattr(value, "__len__") or len(value) != checks["length_eq"]):
-            return False
-        if "regex" in checks:
-            if not isinstance(value, str) or not re.search(checks["regex"], value):
-                return False
-        if "contains_all" in checks:
-            if not isinstance(value, str):
-                return False
-            if not all(re.search(p, value) for p in checks["contains_all"]):
-                return False
-        return True
-    return values_equal(value, expected)
 
 
 def run_eval(

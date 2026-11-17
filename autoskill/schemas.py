@@ -104,3 +104,28 @@ def values_equal(a: Any, b: Any) -> bool:
     if isinstance(a, list) and isinstance(b, list):
         return len(a) == len(b) and all(values_equal(x, y) for x, y in zip(a, b))
     return a == b
+
+
+def match_expected(value: Any, expected: Any) -> bool:
+    """期望匹配：精确值比较，或 _check 谓词（随机性输出的自测/评测通用）。
+
+    _check 支持：type_is / length_eq / regex / contains_all（后两者为正则）。
+    """
+    import re as _re
+
+    if isinstance(expected, dict) and "_check" in expected:
+        checks = expected["_check"]
+        if "type_is" in checks and type(value).__name__ != checks["type_is"]:
+            return False
+        if "length_eq" in checks and (not hasattr(value, "__len__") or len(value) != checks["length_eq"]):
+            return False
+        if "regex" in checks:
+            if not isinstance(value, str) or not _re.search(checks["regex"], value):
+                return False
+        if "contains_all" in checks:
+            if not isinstance(value, str):
+                return False
+            if not all(_re.search(p, value) for p in checks["contains_all"]):
+                return False
+        return True
+    return values_equal(value, expected)

@@ -73,7 +73,8 @@ class Router:
         user_payload = json.dumps(
             {"需求": requirement, "候选技能": candidates}, ensure_ascii=False
         )
-        for attempt in (1, 2):  # 裁决输出非法时重试一次
+        none_confirmed = False
+        for attempt in (1, 2):  # 裁决输出非法时重试一次；none 时追加一次复核
             try:
                 decision = self.llm.chat_json(ADJUDICATE_SYSTEM, user_payload, temperature=0.0)
                 d = str(decision.get("decision", "")).lower()
@@ -92,7 +93,25 @@ class Router:
                         candidates=candidates,
                     )
                 if d == "none":
-                    return RouteResult(hit=False, reason=str(decision.get("reason", "候选均不匹配")), candidates=candidates)
+                    if attempt == 1:
+                        # 假阴性复核（不对称设计：误 none 只多花一次调用，误 use 才危险）——
+                        # 防止 LLM 因"参数构造复杂"而把可命中的候选误判为 none
+                        user_payload = json.dumps(
+                            {
+                                "需求": requirement,
+                                "候选技能": candidates,
+                                "复核要求": "请逐个复核候选技能：只要某候选的功能描述与需求核心动作一致，就选择 use 并按其 schema 构造参数；"
+                                "仅当能力确实无法完成需求时才返回 none。不要因为参数构造麻烦而误判 none。",
+                            },
+                            ensure_ascii=False,
+                        )
+                        none_confirmed = True
+                        continue
+                    return RouteResult(
+                        hit=False,
+                        reason=str(decision.get("reason", "候选均不匹配（已复核）")) if none_confirmed else str(decision.get("reason", "候选均不匹配")),
+                        candidates=candidates,
+                    )
                 raise ValueError(f"未知 decision: {d!r}")
             except LLMFormatError as e:
                 logger.warning("裁决输出解析失败 attempt=%d: %s", attempt, e)

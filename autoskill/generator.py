@@ -21,7 +21,7 @@ from .ast_guard import IMPORT_WHITELIST, check_code, check_contract
 from .config import Settings
 from .executor.base import Executor
 from .llm import LLMClient, LLMFormatError
-from .schemas import values_equal as _values_equal
+from .schemas import match_expected
 
 logger = logging.getLogger("autoskill.generator")
 
@@ -44,7 +44,10 @@ GEN_SYSTEM = f"""你是 AutoSkill 系统的技能生成器，为 Agent 生产可
 6. 禁止任何网络访问、文件读写、子进程、环境变量访问——这是纯计算技能
 7. 能力边界（诚实拒绝）：若需求本质上需要网络请求、文件/系统访问、子进程、数据库等白名单无法真实实现的能力，必须输出 {{"reject": true, "reason": "该需求需要XX能力，超出纯计算技能边界"}}，严禁编造看似可用实则虚假的实现
 8. tests 至少 3 组，覆盖典型与边界输入；expected 必须与 run 的实际返回结构完全一致（含键名与包装层级）
-9. params 的 JSON Schema 必须与 impl_code 中实际读取的键完全一致"""
+9. 随机性输出（随机密码/UUID 等）：tests 的 expected 使用断言对象 {{"_check": {{"type_is": "str", "length_eq": 16, "regex": "^[A-Za-z0-9]+$", "contains_all": ["[A-Z]", "[a-z]", "[0-9]"]}}}}，严禁写具体随机值
+10. impl_code 与 tests 务求精简（impl 通常不超过 60 行、tests 3~5 组），避免输出超长被截断
+11. description 必须覆盖需求的关键动作与对象；若需求含英文术语或参数名（如 max、min、md5、base64），description 必须原样包含它们（用于向量召回）
+12. params 的 JSON Schema 必须与 impl_code 中实际读取的键完全一致"""
 
 
 @dataclass
@@ -204,7 +207,7 @@ class Generator:
                     problems.append(f"用例[{i}] runner 崩溃 code={result.exit_code}: {result.stderr[-200:]}")
                 elif not result.ok:
                     problems.append(f"用例[{i}] 运行失败: {result.error[:300]}")
-                elif not _values_equal(result.data, case["expected"]):
+                elif not match_expected(result.data, case["expected"]):
                     problems.append(f"用例[{i}] 结果不符: got={json.dumps(result.data, ensure_ascii=True, default=str)[:200]} want={json.dumps(case['expected'], ensure_ascii=True, default=str)[:200]}")
             if problems:
                 return "沙箱自测未通过（共 %d 组用例）:\n" % len(skill.tests) + "\n".join(problems)

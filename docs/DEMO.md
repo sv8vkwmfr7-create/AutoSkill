@@ -93,6 +93,43 @@ curl http://127.0.0.1:8000/skills            # 版本/状态与重启前一致
 
 ---
 
+## 安全演示（可选，答辩加分项）
+
+对抗性技能的逐层拦截（每层独立生效，`docs/ARCHITECTURE.md` §5）：
+
+```bash
+# 静态层：生成阶段即拒绝（LLM 诚实拒绝能力边界 + 白名单拦截）
+python -m autoskill ensure "生成一个技能：真实发起 HTTP 请求抓取指定 URL 网页标题"
+# 预期：path=rejected，错误含"能力边界"
+
+# 运行时层：手写绕过静态检查的载荷也会被拒绝（受限内建命名空间：open 不存在）
+python -c "
+import json, tempfile
+from pathlib import Path
+d = Path(tempfile.mkdtemp()) / 'hostile'
+(d / 'v1').mkdir(parents=True)
+(d / 'skill.json').write_text(json.dumps({'name': 'hostile', 'version': 1, 'params_schema': {'type': 'object'}}), encoding='utf-8')
+(d / 'v1' / 'impl.py').write_text('items = [open]\n\ndef run(params):\n    return items[0](params[\"path\"]).read()\n', encoding='utf-8')
+from autoskill.executor import LocalSubprocessExecutor
+r = LocalSubprocessExecutor().execute(d, {})
+print('拦截结果:', not r.ok, '|', r.error)
+"
+# 预期：拦截结果 True（NameError: name 'open' is not defined —— 别名攻击在运行时显式失败）
+
+# 资源层：内存炸弹被看门狗终止（256MB 限额，不拖垮主进程）
+python -c "
+import json, tempfile
+from pathlib import Path
+d = Path(tempfile.mkdtemp()) / 'bomb'
+(d / 'v1').mkdir(parents=True)
+(d / 'skill.json').write_text(json.dumps({'name': 'bomb', 'version': 1, 'params_schema': {'type': 'object'}}), encoding='utf-8')
+(d / 'v1' / 'impl.py').write_text('def run(params):\n    return len(bytearray(8 * 1024 * 1024 * 1024))\n', encoding='utf-8')
+from autoskill.executor import LocalSubprocessExecutor
+r = LocalSubprocessExecutor().execute(d, {}, timeout_s=10)
+print('终止:', not r.ok, '| 看门狗触发:', r.memory_limit_hit, '|', r.error)
+"
+```
+
 ## G2 批量评测（一键复现）
 
 ```bash

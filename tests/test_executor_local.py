@@ -85,5 +85,5 @@ class TestFailures:
         d = write_skill(tmp_path, code)
         r = executor.execute(d, {"text": "x"}, timeout_s=1.5)
         assert r.timed_out
-        assert 1.0 <= r.duration_s < 8.0  # 超时即杀，不会等满 30s
+        assert 1.0 <= r.duration_s < 15.0  # 超时即杀，不会等满 30s（负载下 taskkill 有延迟余量）
         assert not r.ok

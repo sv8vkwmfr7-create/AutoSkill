@@ -38,10 +38,17 @@ class TestRouteDecision:
         assert r.candidates[0]["similarity"] == pytest.approx(SIM)
 
     def test_none_when_no_candidate_matches(self, tmp_path):
-        svc = setup_router(tmp_path, [{"decision": "none", "skill": None, "params": {}, "reason": "候选均无法完成"}])
+        # none 会触发一次复核调用，复核后仍为 none 才返回未命中
+        svc = setup_router(
+            tmp_path,
+            [
+                {"decision": "none", "skill": None, "params": {}, "reason": "候选均无法完成"},
+                {"decision": "none", "skill": None, "params": {}, "reason": "复核确认：无法完成"},
+            ],
+        )
         r = svc.router.route("给图片加水印")
         assert not r.hit
-        assert r.reason == "候选均无法完成"
+        assert "复核确认" in r.reason
 
     def test_low_similarity_skips_llm(self, tmp_path):
         fake = FakeLLM([])
@@ -88,7 +95,14 @@ class TestRouterConfig:
                 VecHit(id="dead_skill", document="", metadata={"status": "quarantined"}, sim=0.9),
             ]
         )
-        svc = make_service(tmp_path, llm=FakeLLM([{"decision": "none", "skill": None, "params": {}, "reason": "x"}]), store=store)
+        svc = make_service(
+            tmp_path,
+            llm=FakeLLM([
+                {"decision": "none", "skill": None, "params": {}, "reason": "x"},
+                {"decision": "none", "skill": None, "params": {}, "reason": "复核 x"},
+            ]),
+            store=store,
+        )
         r = svc.router.route("任意需求")
         # 隔离技能不应进入候选
         assert all(c["name"] != "dead_skill" for c in r.candidates)

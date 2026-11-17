@@ -12,5 +12,13 @@ __all__ = ["ExecResult", "Executor", "LocalSubprocessExecutor", "DockerExecutor"
 
 def make_executor(settings: Settings) -> Executor:
     if settings.executor == "docker":
-        return DockerExecutor()
-    return LocalSubprocessExecutor()
+        return DockerExecutor(
+            image=settings.docker_image,
+            memory=settings.docker_memory,
+            cpus=settings.docker_cpus,
+            pids_limit=settings.docker_pids_limit,
+        )
+    return LocalSubprocessExecutor(
+        memory_mb=settings.sandbox_memory_mb,
+        max_processes=settings.sandbox_max_processes,
+    )

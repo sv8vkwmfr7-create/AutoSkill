@@ -16,6 +16,7 @@ class ExecResult:
     stderr: str
     duration_s: float
     timed_out: bool = False
+    memory_limit_hit: bool = False  # 内存看门狗/Job Object 触发终止
     protocol: dict[str, Any] | None = field(default=None)  # runner 协议 JSON
 
     @property
@@ -34,10 +35,14 @@ class ExecResult:
 
     @property
     def error(self) -> str:
+        if self.ok:
+            return ""
         if self.protocol and self.protocol.get("error"):
             return str(self.protocol["error"])
         if self.timed_out:
             return f"执行超时（>{getattr(self, 'timeout_s', '?')}s，进程树已终止）"
+        if getattr(self, "memory_limit_hit", False):
+            return f"内存超过限额（{getattr(self, 'memory_limit_mb', '?')}MB），进程树已终止（安全隔离）"
         if self.exit_code not in (0, None):
             return f"runner 异常退出 code={self.exit_code}: {self.stderr[-300:]}"
         return "未知执行错误"

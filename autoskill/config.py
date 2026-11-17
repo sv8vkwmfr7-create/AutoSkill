@@ -55,6 +55,14 @@ class Settings:
     # 执行器与沙箱
     executor: str = "local"  # local | docker
     exec_timeout_s: float = 10.0
+    # 本地沙箱资源围栏（Windows Job Object）
+    sandbox_memory_mb: int = 256
+    sandbox_max_processes: int = 32
+    # Docker 后端（AUTOSKILL_EXECUTOR=docker 时生效）
+    docker_image: str = "python:3.14-slim"
+    docker_memory: str = "256m"
+    docker_cpus: str = "0.5"
+    docker_pids_limit: int = 64
 
     # 存储与召回
     skills_dir: Path = PROJECT_ROOT / "skills"
@@ -63,7 +71,7 @@ class Settings:
     embedding_backend: str = "auto"  # auto | provider | local
     embedding_model: str = ""
     top_k: int = 3
-    min_candidate_sim: float = 0.10  # 进入 LLM 裁决的候选相似度下限
+    min_candidate_sim: float = 0.06  # 进入 LLM 裁决的候选相似度下限（精度由 LLM 裁决保证）
     dedup_sim: float = 0.92  # 视为同一意图（触发版本升级）的相似度阈值
 
     # 生成与熔断
@@ -85,13 +93,19 @@ class Settings:
             llm_json_mode=_env("AUTOSKILL_LLM_JSON_MODE", "1") not in ("0", "false", "no"),
             executor=_env("AUTOSKILL_EXECUTOR", "local"),
             exec_timeout_s=_env_float("AUTOSKILL_EXEC_TIMEOUT_S", 10.0),
+            sandbox_memory_mb=_env_int("AUTOSKILL_SANDBOX_MEMORY_MB", 256),
+            sandbox_max_processes=_env_int("AUTOSKILL_SANDBOX_MAX_PROCESSES", 32),
+            docker_image=_env("AUTOSKILL_DOCKER_IMAGE", "python:3.14-slim"),
+            docker_memory=_env("AUTOSKILL_DOCKER_MEMORY", "256m"),
+            docker_cpus=_env("AUTOSKILL_DOCKER_CPUS", "0.5"),
+            docker_pids_limit=_env_int("AUTOSKILL_DOCKER_PIDS_LIMIT", 64),
             skills_dir=Path(_env("AUTOSKILL_SKILLS_DIR", str(PROJECT_ROOT / "skills"))),
             data_dir=Path(_env("AUTOSKILL_DATA_DIR", str(PROJECT_ROOT / "data"))),
             vector_store=_env("AUTOSKILL_VECTOR_STORE", "auto"),
             embedding_backend=_env("AUTOSKILL_EMBEDDING", "auto"),
             embedding_model=_env("AUTOSKILL_EMBEDDING_MODEL", ""),
             top_k=_env_int("AUTOSKILL_TOP_K", 3),
-            min_candidate_sim=_env_float("AUTOSKILL_MIN_CANDIDATE_SIM", 0.10),
+            min_candidate_sim=_env_float("AUTOSKILL_MIN_CANDIDATE_SIM", 0.06),
             dedup_sim=_env_float("AUTOSKILL_DEDUP_SIM", 0.92),
             max_repair_rounds=_env_int("AUTOSKILL_MAX_REPAIR_ROUNDS", 3),
             breaker_threshold=_env_int("AUTOSKILL_BREAKER_THRESHOLD", 3),
