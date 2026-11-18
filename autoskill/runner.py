@@ -27,7 +27,9 @@ import json
 import sys
 import builtins
 import importlib.util
+import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # 与 ast_guard.IMPORT_WHITELIST 保持一致（runner 自包含，独立副本）
 _RUNTIME_IMPORT_WHITELIST = frozenset(
@@ -39,13 +41,16 @@ _RUNTIME_IMPORT_WHITELIST = frozenset(
     }
 )
 
-# 审计事件默认拒绝清单（前缀匹配；PEP 578 事件名）
+# 审计事件默认拒绝清单（前缀匹配；PEP 578 事件名）。
+# socket./urllib. 不再一刀切：egress 白名单机制下按域名放行（见 _install_audit_hook）
 _DENY_EVENT_PREFIXES = (
-    "os.", "socket.", "subprocess.", "urllib.", "http.", "ftplib.",
+    "os.", "subprocess.", "http.", "ftplib.",
     "smtplib.", "telnetlib.", "ctypes.", "winreg.", "msvcrt.", "pickle.",
     "shutil.", "tempfile.", "webbrowser.", "multiprocessing.", "crypt.",
 )
 _DENY_EVENTS = {"eval"}
+
+_EGRESS_HOSTS: set = set()  # 由 main() 从部署配置 ∩ 技能声明 计算得出
 
 # 危险标准库排除表：这些模块在 sys.stdlib_module_names 中但具备 IO/网络/执行能力，
 # 传递性依赖判定时必须显式排除（socket/subprocess/os 等绝不给技能 import）
@@ -144,6 +149,8 @@ def _install_audit_hook(skill_dir: Path) -> None:
     import 判定采用"解释器目录文件路径"而非仅模块名：whitelist 模块的传递性依赖
     （hashlib -> _hashlib、re -> enum、datetime -> time）都是标准库文件，必须放行；
     而 site-packages 中的第三方包（requests 等）无论模块名一律拒绝。
+    egress：socket.getaddrinfo 按"目标域名 ∈ 部署白名单 ∩ 技能声明"放行，
+    socket.connect 仅可能由 runner 受信 HTTP 助手发起（技能无法创建套接字）。
     """
     base = str(Path(getattr(sys, "base_prefix", sys.prefix)).resolve()).replace("\\\\", "/").lower().rstrip("/")
     skill_root = str(Path(skill_dir).resolve()).replace("\\\\", "/").lower().rstrip("/")
@@ -181,8 +188,37 @@ def _install_audit_hook(skill_dir: Path) -> None:
             if module and not _allow_import(module, filename):
                 raise PermissionError(f"沙箱安全策略拒绝导入模块（安全隔离）: {module}")
             return
+        if event == "socket.getaddrinfo":
+            host = str(args[0]).lower() if args and args[0] else ""
+            if host not in _EGRESS_HOSTS:
+                raise PermissionError(f"沙箱安全策略拒绝访问非白名单域名（安全隔离）: {host}")
+            return
+        if event == "socket.connect":
+            # 技能无法创建套接字（socket 模块被禁、无法 import），
+            # 连接仅可能来自 runner 受信 HTTP 助手，其域名已在 getaddrinfo 阶段校验
+            return
+        if event in ("http.client.connect", "http.client.send"):
+            # args[0] 是 http.client 连接对象（非主机名字符串），从对象属性取 host
+            conn = args[0] if args else None
+            host = (str(getattr(conn, "host", "") or "") or "").lower()
+            if host.startswith("[") and "]" in host:  # IPv6 字面量
+                host = host[1 : host.index("]")]
+            elif ":" in host:
+                host = host.split(":")[0]
+            if host not in _EGRESS_HOSTS:
+                raise PermissionError(f"沙箱安全策略拒绝访问非白名单域名（安全隔离）: {host}")
+            return
         if event.startswith(_DENY_EVENT_PREFIXES):
             raise PermissionError(f"沙箱安全策略拒绝系统调用（安全隔离）: {event}")
+        if event == "urllib.Request":
+            # 受信 HTTP 助手使用 urllib：按 URL 域名白名单校验（纵深防御第二道）
+            try:
+                host = (urlsplit(str(args[0])).hostname or "").lower()
+            except Exception:  # noqa: BLE001
+                raise PermissionError("沙箱安全策略拒绝非法 URL（安全隔离）") from None
+            if host not in _EGRESS_HOSTS:
+                raise PermissionError(f"沙箱安全策略拒绝访问非白名单域名（安全隔离）: {host}")
+            return
         if event == "open":
             try:
                 target, mode = args[0], (args[1] if len(args) > 1 else "") or ""
@@ -226,7 +262,41 @@ def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
 def _build_restricted_builtins() -> dict:
     restricted = {k: v for k, v in vars(builtins).items() if k not in _BANNED_BUILTIN_NAMES}
     restricted["__import__"] = _guarded_import
+    restricted["http_get"] = _http_get
+    restricted["http_post"] = _http_post
     return restricted
+
+
+# ---------------------------------------------------------------------------
+# 受信 HTTP 助手（egress 白名单唯一的出站通道；域名双重校验：助手入口 + 审计钩子）
+# ---------------------------------------------------------------------------
+
+_HTTP_MAX_BODY = 1_000_000  # 响应体上限 1MB
+
+
+def _http_request(url: str, method: str = "GET", body=None, headers=None, timeout: float = 5.0) -> dict:
+    u = urlsplit(str(url))
+    if u.scheme not in ("http", "https"):
+        raise PermissionError(f"沙箱安全策略仅允许 http/https 协议（安全隔离）: {u.scheme or '空'}")
+    host = (u.hostname or "").lower()
+    if not host or host not in _EGRESS_HOSTS:
+        raise PermissionError(f"沙箱安全策略拒绝访问非白名单域名（安全隔离）: {host or url}")
+    data = body.encode("utf-8") if isinstance(body, str) else body
+    req = urllib.request.Request(url, data=data, headers=dict(headers or {}), method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return {
+            "status": resp.status,
+            "headers": dict(resp.headers),
+            "body": resp.read(_HTTP_MAX_BODY).decode("utf-8", "replace"),
+        }
+
+
+def _http_get(url: str, timeout: float = 5.0) -> dict:
+    return _http_request(url, "GET", timeout=timeout)
+
+
+def _http_post(url: str, body=None, headers=None, timeout: float = 5.0) -> dict:
+    return _http_request(url, "POST", body=body, headers=headers, timeout=timeout)
 
 
 def main() -> None:
@@ -235,6 +305,15 @@ def main() -> None:
     if len(sys.argv) < 2:
         _fail("缺少 skill_dir 参数")
     skill_dir = Path(sys.argv[1]).resolve()
+
+    # egress 白名单：部署配置（executor 注入的 --egress 参数）∩ 技能声明（skill.json）
+    # 取交集实施"最小必要域名"原则：操作员放行 + 技能声明，两者缺一不可
+    egress_csv = ""
+    if "--egress" in sys.argv:
+        idx = sys.argv.index("--egress")
+        if idx + 1 < len(sys.argv):
+            egress_csv = sys.argv[idx + 1]
+    config_hosts = {h.strip().lower() for h in egress_csv.split(",") if h.strip()}
 
     try:
         meta = json.loads((skill_dir / "skill.json").read_text(encoding="utf-8"))
@@ -261,6 +340,9 @@ def main() -> None:
         _fail(f"impl 不存在: {impl_path}", exit_code=0)
 
     # 安装审计沙箱：impl 的加载与执行全程处于默认拒绝策略下
+    declared_hosts = {h.strip().lower() for h in (meta.get("egress") or {}).get("allow_hosts", [])}
+    _EGRESS_HOSTS.clear()
+    _EGRESS_HOSTS.update(declared_hosts & config_hosts)  # 交集 = 最小必要域名
     _install_audit_hook(skill_dir)
 
     spec = importlib.util.spec_from_file_location("skill_impl", impl_path)

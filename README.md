@@ -103,5 +103,5 @@ scripts/              执行器对比基准（local vs docker）
 ## 已知限制（MVP 边界）
 
 - **local 执行器整体仍是 dev-only 行为隔离**：五层纵深显著提高了绕过成本（静态盲区由受限命名空间兜住、动态绕过由审计钩子兜住、内存炸弹由看门狗终止），但用户态隔离不防御内核级攻击向量；**真正的安全边界是已实装的 DockerExecutor**（`AUTOSKILL_EXECUTOR=docker`，需本机安装 Docker）
-- 白名单从严（23 个纯计算模块）且无人工豁免通道——HTTP 类技能属 P1 场景（egress 白名单代理）
+- HTTP 类技能走 **egress 白名单**：操作员配置 `AUTOSKILL_EGRESS_HOSTS=api.github.com,...`，生成器声明的域名必须是部署白名单子集，运行时四点校验（DNS/连接/发送/URL）只放行白名单域名；未配置 = 全禁网（默认）
 - 不做多租户、前端面板、分布式、技能市场、运行时 pip 装依赖——被问到就答"MVP 边界，扩容方案见文档"

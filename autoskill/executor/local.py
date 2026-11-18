@@ -260,21 +260,26 @@ class _WindowsJobObject:
 class LocalSubprocessExecutor:
     name = "local"
 
-    def __init__(self, python_exe: str | None = None, memory_mb: int = 256, max_processes: int = 32):
+    def __init__(self, python_exe: str | None = None, memory_mb: int = 256, max_processes: int = 32,
+                 egress_hosts: list[str] | None = None):
         # 解析 trampoline：uv venv 的 python.exe 是跳板，直接启动真实解释器
         self.python_exe = _resolve_real_python(python_exe or sys.executable)
         self.memory_mb = memory_mb
         self.max_processes = max_processes
+        self.egress_hosts = [h.lower() for h in (egress_hosts or [])]
 
     def healthcheck(self) -> str:
         return (
             f"LocalSubprocessExecutor(python={self.python_exe}) dev-only | "
             f"受限内建+审计沙箱(PEP578)+内存看门狗({self.memory_mb}MB)+JobObject"
+            + (f"+egress({','.join(self.egress_hosts)})" if self.egress_hosts else "")
         )
 
     def execute(self, skill_dir: Path, params: dict, timeout_s: float | None = None) -> ExecResult:
         timeout = float(timeout_s or 10.0)
         cmd = [self.python_exe, "-I", "-B", str(RUNNER_PATH), str(skill_dir)]
+        if self.egress_hosts:
+            cmd += ["--egress", ",".join(self.egress_hosts)]
         stdin_payload = json.dumps({"params": params}, ensure_ascii=True).encode("utf-8")
 
         start = time.monotonic()

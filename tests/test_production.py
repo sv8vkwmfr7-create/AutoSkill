@@ -130,6 +130,131 @@ class TestConcurrentGeneration:
         assert svc.registry.get("boom").status == "quarantined"
 
 
+class TestAutoRollback:
+    """熔断自动回退：晋升版本连续失败时，自动回归最近已验证稳定版本恢复服务。"""
+
+    IMPL_OK = "def run(params):\n    return params['text'] * params['repeat']\n"
+    IMPL_BAD_V2 = "def run(params):\n    if params['text'] == 'xy':\n        raise ValueError('v2 bug on xy')\n    return params['text'] * params['repeat']\n"
+
+    def _register_and_prove(self, svc, name="rollback_demo"):
+        svc.registry.register(
+            name=name,
+            description="把字符串重复 repeat 次的演示技能",
+            tags=["string"],
+            params_schema={"type": "object", "properties": {"text": {"type": "string"}, "repeat": {"type": "integer"}},
+                           "required": ["text", "repeat"]},
+            impl_code=self.IMPL_OK,
+            tests=[],
+        )
+        for _ in range(2):  # 连续成功达标 -> v1 记为已验证稳定
+            svc.registry.record_success(name)
+        assert svc.registry.get(name).stable_version == 1
+        return name
+
+    def test_rollback_on_v2_regression(self, tmp_path):
+        svc = make_service(tmp_path, llm=FakeLLM([]))
+        name = self._register_and_prove(svc)
+        svc.registry.promote(name, 2, note="shadow-promoted v2")  # v2 上线
+        v2dir = tmp_path / "skills" / name / "v2"
+        v2dir.mkdir(parents=True, exist_ok=True)
+        (v2dir / "impl.py").write_text("def run(params):\n    return 1 / 0\n", encoding="utf-8")
+
+        for _ in range(3):  # v2 连续失败 3 次
+            meta, quarantined = svc.registry.record_failure(name)
+        # 自动回退：生效版本回到 v1 且状态恢复 active（不是 quarantined）
+        assert quarantined is False
+        meta = svc.registry.get(name)
+        assert meta.version == 1 and meta.status == "active"
+        assert meta.fail_streak == 0
+        assert any("auto-rollback" in h["note"] for h in meta.history)
+
+    def test_no_rollback_without_stable_version(self, tmp_path):
+        """v1 从未验证稳定 -> 熔断后保持隔离，等待修复（不回退到自己）。"""
+        svc = make_service(tmp_path, llm=FakeLLM([]))
+        svc.registry.register(
+            name="fresh_break",
+            description="从未验证稳定的演示技能",
+            tags=["demo"],
+            params_schema={"type": "object"},
+            impl_code="def run(params):\n    raise ValueError('bad')\n",
+            tests=[],
+        )
+        for _ in range(3):
+            meta, quarantined = svc.registry.record_failure("fresh_break")
+        assert quarantined is True
+        assert svc.registry.get("fresh_break").status == "quarantined"
+        assert svc.registry.get("fresh_break").version == 1
+
+    def test_stable_marks_after_min_successes(self, tmp_path):
+        svc = make_service(tmp_path, llm=FakeLLM([]), rollback_min_successes=2)
+        svc.registry.register(
+            name="stable_demo",
+            description="演示技能",
+            tags=["demo"],
+            params_schema={"type": "object"},
+            impl_code="def run(params):\n    return 0\n",
+            tests=[],
+        )
+        svc.registry.record_success("stable_demo")
+        assert svc.registry.get("stable_demo").stable_version == 0  # 未达标
+        svc.registry.record_success("stable_demo")
+        assert svc.registry.get("stable_demo").stable_version == 1  # 达标标记
+
+
+class TestEgressGeneration:
+    def test_egress_outside_deploy_allowlist_rejected(self, tmp_path):
+        """技能声明的域名不在部署白名单 -> 生成被拒绝（操作员拥有出站策略）。"""
+        skill = {
+            "name": "fetch_thing",
+            "description": "通过 HTTP 获取数据 fetch_thing 结果",
+            "tags": ["http"],
+            "egress": {"allow_hosts": ["evil.example.net"]},
+            "params": {"type": "object", "properties": {}},
+            "impl_code": "def run(params):\n    return http_get('https://evil.example.net/data')['body']\n",
+            "tests": [
+                {"input": {}, "expected": {"_check": {"type_is": "str"}}},
+                {"input": {}, "expected": {"_check": {"type_is": "str"}}},
+                {"input": {}, "expected": {"_check": {"type_is": "str"}}},
+            ],
+        }
+        fake = FakeLLM([skill])
+        svc = make_service(tmp_path, llm=fake)  # 部署白名单为空
+        r = svc.ensure("获取数据")
+        assert not r.ok
+        assert r.path == "rejected"
+        assert "白名单" in r.error
+        assert svc.registry.names() == []
+
+    def test_egress_subset_passes_validation(self, tmp_path):
+        """声明在部署白名单内：通过 egress 校验（沙箱自测真实请求 example.com，需外网）。"""
+        import urllib.request
+
+        try:
+            urllib.request.urlopen("https://example.com/", timeout=5)
+        except Exception:
+            pytest.skip("无外网，跳过真实 HTTP 用例")
+        skill = {
+            "name": "fetch_status",
+            "description": "获取 example.com 的 HTTP 状态码",
+            "tags": ["http"],
+            "egress": {"allow_hosts": ["example.com"]},
+            "params": {"type": "object", "properties": {}},
+            "impl_code": "def run(params):\n    return http_get('https://example.com/')['status']\n",
+            "tests": [
+                {"input": {}, "expected": 200},
+                {"input": {}, "expected": 200},
+                {"input": {}, "expected": 200},
+            ],
+        }
+        fake = FakeLLM([skill, {"params": {}}])
+        # egress 必须在服务构造时传入（executor 构造时捕获白名单）
+        svc = make_service(tmp_path, llm=fake, egress_hosts=["example.com"])
+        r = svc.ensure("获取 example.com 的状态码")
+        assert r.ok, r.error
+        assert r.output == 200
+        assert r.detail.get("version") == 1
+
+
 class TestShadowGate:
     """升级/修复的影子验证门禁：候选通过真实参数执行才热替换，失败自动回滚。"""
 

@@ -29,6 +29,9 @@ class SkillMeta:
     history: list[dict] = field(default_factory=list)  # [{version, created_at, note}]
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    stable_version: int = 0  # 最近一个经连续成功验证的稳定版本（0 = 尚无；自动回退目标）
+    promoted_successes: int = 0  # 当前生效版本晋升后的连续成功次数
+    egress: dict | None = None  # HTTP 类技能的 egress 声明 {"allow_hosts": [...]}
 
     def to_dict(self) -> dict:
         return {
@@ -42,6 +45,9 @@ class SkillMeta:
             "history": self.history,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "stable_version": self.stable_version,
+            "promoted_successes": self.promoted_successes,
+            **({"egress": self.egress} if self.egress else {}),
         }
 
     def to_json(self) -> str:
@@ -60,6 +66,9 @@ class SkillMeta:
             history=list(d.get("history", [])),
             created_at=float(d.get("created_at", time.time())),
             updated_at=float(d.get("updated_at", time.time())),
+            stable_version=int(d.get("stable_version", 0)),
+            promoted_successes=int(d.get("promoted_successes", 0)),
+            egress=d.get("egress"),
         )
 
 

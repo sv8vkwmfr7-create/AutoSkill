@@ -18,9 +18,10 @@ logger = logging.getLogger("autoskill.registry")
 
 
 class SkillRegistry:
-    def __init__(self, skills_dir: Path, breaker_threshold: int = 3):
+    def __init__(self, skills_dir: Path, breaker_threshold: int = 3, rollback_min_successes: int = 2):
         self.skills_dir = Path(skills_dir)
         self.breaker_threshold = max(breaker_threshold, 1)
+        self.rollback_min_successes = max(rollback_min_successes, 1)  # 连续成功达标后才记为"已验证稳定"
         self._skills: dict[str, SkillMeta] = {}
         self._lock = threading.RLock()
         self.skills_dir.mkdir(parents=True, exist_ok=True)
@@ -60,15 +61,23 @@ class SkillRegistry:
             meta = self._skills.get(name)
             if meta is None:
                 return None
+            meta.promoted_successes += 1
+            marked = False
             if meta.fail_streak or meta.status != ACTIVE:
                 meta.fail_streak = 0
                 if meta.status == QUARANTINED:  # 理论不可达：隔离技能不允许被调用
                     meta.status = ACTIVE
+            elif (meta.promoted_successes >= self.rollback_min_successes
+                  and meta.stable_version != meta.version):
+                # 连续成功达标：当前版本记为"已验证稳定"（作为将来自动回退的目标）
+                meta.stable_version = meta.version
+                marked = True
+            if meta.fail_streak == 0 or marked:
                 self._persist(meta)
             return meta
 
     def record_failure(self, name: str) -> tuple[SkillMeta | None, bool]:
-        """返回 (meta, 是否刚被熔断)。"""
+        """返回 (meta, 是否刚被熔断)。存在已验证稳定版本时自动回退恢复服务。"""
         with self._lock:
             meta = self._skills.get(name)
             if meta is None:
@@ -77,11 +86,33 @@ class SkillRegistry:
             meta.updated_at = time.time()
             quarantined_now = False
             if meta.fail_streak >= self.breaker_threshold and meta.status == ACTIVE:
-                meta.status = QUARANTINED
-                quarantined_now = True
-                logger.warning("技能熔断: %s 连续失败 %d 次 -> quarantined", name, meta.fail_streak)
+                if self._try_rollback(meta):
+                    quarantined_now = False  # 回退到稳定版本，服务已恢复
+                else:
+                    meta.status = QUARANTINED
+                    quarantined_now = True
+                    logger.warning("技能熔断: %s 连续失败 %d 次 -> quarantined", name, meta.fail_streak)
             self._persist(meta)
             return meta, quarantined_now
+
+    def _try_rollback(self, meta: SkillMeta) -> bool:
+        """自动回退：当前生效版本回归到最近一个已验证稳定版本。返回是否已回退。"""
+        if (meta.stable_version
+                and meta.stable_version < meta.version
+                and (self.skill_dir(meta.name) / f"v{meta.stable_version}" / "impl.py").exists()):
+            bad = meta.version
+            meta.history.append({
+                "version": meta.stable_version,
+                "created_at": time.time(),
+                "note": f"auto-rollback from v{bad}",
+            })
+            meta.version = meta.stable_version
+            meta.status = ACTIVE
+            meta.fail_streak = 0
+            meta.promoted_successes = self.rollback_min_successes  # 稳定性已被历史验证
+            logger.warning("技能 %s 自动回退: v%d -> v%d（最近稳定版本）", meta.name, bad, meta.stable_version)
+            return True
+        return False
 
     # ---- 注册 / 版本 ---------------------------------------------------------
     def stage_files(self, name: str, impl_code: str, tests: list[dict]) -> int:
@@ -101,7 +132,7 @@ class SkillRegistry:
             (vdir / "tests.json").write_text(json.dumps(tests, ensure_ascii=False, indent=2), encoding="utf-8")
             return version
 
-    def promote(self, name: str, version: int, note: str = "") -> SkillMeta:
+    def promote(self, name: str, version: int, note: str = "", egress: dict | None = None) -> SkillMeta:
         """把候选版本设为生效版本（热替换）：status 回 active、熔断计数清零。"""
         with self._lock:
             meta = self._skills.get(name)
@@ -111,6 +142,9 @@ class SkillRegistry:
             meta.version = version
             meta.status = ACTIVE
             meta.fail_streak = 0
+            meta.promoted_successes = 0
+            if egress is not None:
+                meta.egress = egress
             meta.history.append({"version": version, "created_at": now, "note": note})
             meta.updated_at = now
             self._persist(meta)
@@ -126,6 +160,7 @@ class SkillRegistry:
         impl_code: str,
         tests: list[dict],
         note: str = "",
+        egress: dict | None = None,
     ) -> SkillMeta:
         """写入新版本；同名技能自动 v(n+1) 并热替换（状态重置为 active）。"""
         with self._lock:
@@ -144,6 +179,8 @@ class SkillRegistry:
                     history=existing.history + [{"version": version, "created_at": now, "note": note}],
                     created_at=existing.created_at,
                     updated_at=now,
+                    stable_version=existing.stable_version,
+                    egress=egress or existing.egress,
                 )
             else:
                 version = 1
@@ -158,6 +195,7 @@ class SkillRegistry:
                     history=[{"version": 1, "created_at": now, "note": note}],
                     created_at=now,
                     updated_at=now,
+                    egress=egress,
                 )
             vdir = self.skill_dir(name) / f"v{version}"
             vdir.mkdir(parents=True, exist_ok=True)

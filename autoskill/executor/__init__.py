@@ -17,8 +17,11 @@ def make_executor(settings: Settings) -> Executor:
             memory=settings.docker_memory,
             cpus=settings.docker_cpus,
             pids_limit=settings.docker_pids_limit,
+            egress_hosts=settings.egress_hosts,
+            network=settings.docker_network,
         )
     return LocalSubprocessExecutor(
         memory_mb=settings.sandbox_memory_mb,
         max_processes=settings.sandbox_max_processes,
+        egress_hosts=settings.egress_hosts,
     )

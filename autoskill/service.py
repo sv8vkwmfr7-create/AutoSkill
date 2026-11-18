@@ -97,7 +97,11 @@ class AutoSkillService:
         self.executor: Executor = make_executor(self.settings)
         self.embedder = make_embedder(self.settings)
         self.store: BaseStore = make_vector_store(self.settings)
-        self.registry = SkillRegistry(self.settings.skills_dir, breaker_threshold=self.settings.breaker_threshold)
+        self.registry = SkillRegistry(
+            self.settings.skills_dir,
+            breaker_threshold=self.settings.breaker_threshold,
+            rollback_min_successes=self.settings.rollback_min_successes,
+        )
         self.router = Router(self.registry, self.store, self.embedder, self.llm, self.settings)
         self.generator = Generator(self.llm, self.executor, self.settings)
         # 并发控制：全局生成锁（防并发 ensure 对同一意图重复生成；召回/调用不受影响）
@@ -313,6 +317,7 @@ class AutoSkillService:
                 impl_code=gen.skill.impl_code,
                 tests=gen.skill.tests,
                 note="auto-generated",
+                egress=gen.skill.egress,
             )
             self._index_skill(meta)
             detail["version"] = meta.version
@@ -444,6 +449,8 @@ class AutoSkillService:
             meta_path = dst / "skill.json"
             meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
             meta_data["version"] = version
+            if gen.skill.egress:
+                meta_data["egress"] = gen.skill.egress
             meta_path.write_text(json.dumps(meta_data, ensure_ascii=False), encoding="utf-8")
             exec_res = self.executor.execute(dst, params, timeout_s=self.settings.exec_timeout_s)
         finally:
@@ -468,6 +475,7 @@ class AutoSkillService:
         meta = self.registry.promote(
             name, version,
             note=("auto-repair shadow v2" if target_name else "shadow-promoted upgrade"),
+            egress=gen.skill.egress,
         )
         self._index_skill(meta)
         detail["version"] = meta.version

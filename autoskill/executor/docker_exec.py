@@ -36,12 +36,16 @@ class DockerExecutor:
         cpus: str = "0.5",
         pids_limit: int = 64,
         docker_exe: str = "docker",
+        egress_hosts: list[str] | None = None,
+        network: str = "none",
     ):
         self.image = image
         self.memory = memory
         self.cpus = cpus
         self.pids_limit = pids_limit
         self.docker_exe = docker_exe
+        self.egress_hosts = [h.lower() for h in (egress_hosts or [])]
+        self.network = network
 
     # ---- 诊断 -----------------------------------------------------------
     def healthcheck(self) -> str:
@@ -67,10 +71,13 @@ class DockerExecutor:
         return staged_skill, staged_runner
 
     def _build_cmd(self, staged_skill: Path, staged_runner: Path, container_name: str) -> list:
-        return [
+        # 网络语义：network=none 时容器全禁网（egress 必然拒绝）；
+        # 需要白名单 HTTP 的场景配置 AUTOSKILL_DOCKER_NETWORK=bridge，
+        # 出站域名的白名单强制仍由容器内 runner 审计钩子执行（技能无法移除）。
+        cmd = [
             self.docker_exe, "run", "--rm",
             "--name", container_name,
-            "--network", "none",
+            "--network", self.network,
             "--read-only",
             "--memory", self.memory,
             "--cpus", self.cpus,
@@ -82,6 +89,9 @@ class DockerExecutor:
             "--entrypoint", "python",
             self.image, "-I", "-B", "/app/runner.py", "/skill",
         ]
+        if self.egress_hosts:
+            cmd += ["--egress", ",".join(self.egress_hosts)]
+        return cmd
 
     # ---- 执行 -----------------------------------------------------------
     def execute(self, skill_dir: Path, params: dict, timeout_s: float | None = None) -> ExecResult:

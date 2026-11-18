@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -63,6 +63,7 @@ class Settings:
     docker_memory: str = "256m"
     docker_cpus: str = "0.5"
     docker_pids_limit: int = 64
+    docker_network: str = "none"  # none=全禁网；bridge=容器可出站（域名白名单由 runner 审计钩子强制）
 
     # 存储与召回
     skills_dir: Path = PROJECT_ROOT / "skills"
@@ -77,6 +78,9 @@ class Settings:
     # 生成与熔断
     max_repair_rounds: int = 3
     breaker_threshold: int = 3  # 连续失败次数 -> quarantined
+    rollback_min_successes: int = 2  # 晋升后连续成功达标 -> 记为已验证稳定（自动回退目标）
+    # egress 白名单（HTTP 类技能可访问的域名；默认空 = 全禁网，与既有安全模型一致）
+    egress_hosts: list[str] = field(default_factory=list)
 
     # Agent
     agent_max_rounds: int = 5
@@ -99,6 +103,7 @@ class Settings:
             docker_memory=_env("AUTOSKILL_DOCKER_MEMORY", "256m"),
             docker_cpus=_env("AUTOSKILL_DOCKER_CPUS", "0.5"),
             docker_pids_limit=_env_int("AUTOSKILL_DOCKER_PIDS_LIMIT", 64),
+            docker_network=_env("AUTOSKILL_DOCKER_NETWORK", "none"),
             skills_dir=Path(_env("AUTOSKILL_SKILLS_DIR", str(PROJECT_ROOT / "skills"))),
             data_dir=Path(_env("AUTOSKILL_DATA_DIR", str(PROJECT_ROOT / "data"))),
             vector_store=_env("AUTOSKILL_VECTOR_STORE", "auto"),
@@ -109,5 +114,7 @@ class Settings:
             dedup_sim=_env_float("AUTOSKILL_DEDUP_SIM", 0.92),
             max_repair_rounds=_env_int("AUTOSKILL_MAX_REPAIR_ROUNDS", 3),
             breaker_threshold=_env_int("AUTOSKILL_BREAKER_THRESHOLD", 3),
+            rollback_min_successes=_env_int("AUTOSKILL_ROLLBACK_MIN_SUCCESSES", 2),
+            egress_hosts=[h.strip().lower() for h in _env("AUTOSKILL_EGRESS_HOSTS", "").split(",") if h.strip()],
             agent_max_rounds=_env_int("AUTOSKILL_AGENT_MAX_ROUNDS", 5),
         )

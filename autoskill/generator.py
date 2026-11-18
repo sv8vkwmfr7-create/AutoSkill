@@ -40,12 +40,13 @@ GEN_SYSTEM = f"""你是 AutoSkill 系统的技能生成器，为 Agent 生产可
 4. 只允许 import 以下模块：{", ".join(sorted(IMPORT_WHITELIST))}
 5. 禁止 eval/exec/compile/open/__import__/input/globals/locals/vars/breakpoint，禁止双下划线属性或名称，禁止相对导入
 6. 禁止任何网络访问、文件读写、子进程、环境变量访问——这是纯计算技能
-7. 能力边界（诚实拒绝）：若需求本质上需要网络请求、文件/系统访问、子进程、数据库等白名单无法真实实现的能力，必须输出 {{"reject": true, "reason": "该需求需要XX能力，超出纯计算技能边界"}}，严禁编造看似可用实则虚假的实现
-8. tests 至少 3 组，覆盖典型与边界输入；expected 必须与 run 的实际返回结构完全一致（含键名与包装层级）
+7. 能力边界（诚实拒绝）：若需求需要文件/系统访问、子进程、数据库、非 HTTP 协议（如 TCP/WebSocket），或需要访问**任意/无法枚举的域名**，必须输出 {{"reject": true, "reason": "该需求需要XX能力，超出技能边界"}}，严禁编造看似可用实则虚假的实现
+8. tests 至少 3 组，覆盖典型与边界输入；expected 必须与 run 的实际返回结构完全一致（含键名与包装层级）；网络类技能的用例优先覆盖不依赖网络的纯逻辑
 9. 随机性输出（随机密码/UUID 等）：tests 的 expected 使用断言对象 {{"_check": {{"type_is": "str", "length_eq": 16, "regex": "^[A-Za-z0-9]+$", "contains_all": ["[A-Z]", "[a-z]", "[0-9]"]}}}}，严禁写具体随机值
 10. impl_code 与 tests 务求精简（impl 通常不超过 60 行、tests 3~5 组），避免输出超长被截断
 11. description 必须覆盖需求的关键动作与对象；若需求含英文术语或参数名（如 max、min、md5、base64），description 必须原样包含它们（用于向量召回）
-12. params 的 JSON Schema 必须与 impl_code 中实际读取的键完全一致"""
+12. params 的 JSON Schema 必须与 impl_code 中实际读取的键完全一致
+13. 真实 HTTP 需求：输出字段 "egress": {{"allow_hosts": ["最小必要域名"]}}，impl 直接调用注入的 http_get(url) / http_post(url, body=None, headers=None)（无需 import，返回 {{"status","headers","body"}}，禁止使用 requests/urllib）。声明的域名必须在部署白名单内，否则生成会被拒绝；域名无法枚举的需求按规则 7 拒绝"""
 
 
 @dataclass
@@ -56,6 +57,7 @@ class GeneratedSkill:
     params: dict
     impl_code: str
     tests: list[dict]
+    egress: dict | None = None  # HTTP 类技能的域名白名单声明 {"allow_hosts": [...]}
 
 
 @dataclass
@@ -137,6 +139,21 @@ class Generator:
         if not contract.ok:
             return GenOutcome(ok=False, rounds=attempt, error="技能契约不满足: " + "; ".join(contract.violations), error_kind="contract", violations=contract.violations)
 
+        # 4.5) egress 白名单校验：声明的域名必须是部署白名单的子集（操作员拥有出站策略）
+        if skill.egress:
+            declared = {str(h).lower() for h in skill.egress.get("allow_hosts", [])}
+            allowed = {h.lower() for h in self.settings.egress_hosts}
+            outside = sorted(declared - allowed)
+            if outside:
+                return GenOutcome(
+                    ok=False, rounds=attempt,
+                    error=f"声明的 egress 域名超出部署白名单（能力边界）: {', '.join(outside)}；"
+                          f"部署白名单: {', '.join(sorted(allowed)) or '（空，当前部署全禁网）'}",
+                    error_kind="guard",
+                    violations=[f"egress 超出部署白名单: {', '.join(outside)}"],
+                    terminal=True,  # 需求中的目标域名不因重试而改变，操作员白名单亦固定 -> 终态拒绝
+                )
+
         # 5) 静态安全检查（AST 白名单）
         guard = check_code(skill.impl_code)
         if not guard.ok:
@@ -179,7 +196,11 @@ class Generator:
             clean_tests.append({"input": t["input"], "expected": t["expected"]})
         tags = raw.get("tags") if isinstance(raw.get("tags"), list) else []
         tags = [str(t) for t in tags][:8]
-        skill = GeneratedSkill(name=name, description=description.strip()[:200], tags=tags, params=params, impl_code=impl_code, tests=clean_tests)
+        egress = raw.get("egress")
+        if not (isinstance(egress, dict) and isinstance(egress.get("allow_hosts"), list) and egress["allow_hosts"]):
+            egress = None
+        skill = GeneratedSkill(name=name, description=description.strip()[:200], tags=tags, params=params,
+                               impl_code=impl_code, tests=clean_tests, egress=egress)
         return skill, ""
 
     def _run_tests(self, skill: GeneratedSkill) -> str:
@@ -188,10 +209,10 @@ class Generator:
         try:
             skill_dir = staging / skill.name
             (skill_dir / "v1").mkdir(parents=True)
-            (skill_dir / "skill.json").write_text(
-                json.dumps({"name": skill.name, "version": 1, "params_schema": skill.params}, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            staged_meta = {"name": skill.name, "version": 1, "params_schema": skill.params}
+            if skill.egress:
+                staged_meta["egress"] = skill.egress  # 自测沙箱按 声明 ∩ 部署白名单 放行出站
+            (skill_dir / "skill.json").write_text(json.dumps(staged_meta, ensure_ascii=False), encoding="utf-8")
             (skill_dir / "v1" / "impl.py").write_text(skill.impl_code, encoding="utf-8")
             (skill_dir / "v1" / "tests.json").write_text(
                 json.dumps(skill.tests, ensure_ascii=False, indent=2), encoding="utf-8"

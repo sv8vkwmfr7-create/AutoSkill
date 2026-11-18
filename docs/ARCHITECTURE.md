@@ -63,7 +63,7 @@ ensure(需求)
 ### 4.1 禁网 vs HTTP 类技能
 
 MVP 场景与安全模型必须自洽：沙箱策略是"禁网 + 只读 + 资源限制"，那么场景定位就必须砍掉 HTTP 类技能。两者不能同时出现在同一份设计里。
-本项目的选择：**MVP 只做纯计算/格式转换技能**（白名单 23 个模块全部无 IO 能力），把"联网技能"划为 P1——方案是 egress 白名单代理（所有出站流量经代理白名单校验），而不是简单放开网络。这样安全叙事是连续的：`禁网沙箱 → 代理白名单沙箱`，而不是"禁网 → 禁网但偷偷能联网"。
+本项目的演进已落地为两段连续的安全叙事：**默认全禁网**（`AUTOSKILL_EGRESS_HOSTS` 为空，纯计算技能）→ **可控联网**（操作员配置域名白名单后，生成器可声明 `egress.allow_hosts`，运行时经四点校验只放行白名单域名，且声明的域名必须是部署白名单的子集——操作员拥有出站策略，LLM 只能请求子集）。未实现 egress 代理容器（出站流量经独立代理进程审计），这是下一步的强化方向；当前域名门禁在进程内审计层完成。
 （无 Docker 的 dev 环境下，静态层是唯一安全机制，更不允许出现"能联网但没隔离"的中间态。）
 
 ### 4.2 LLM 终审裁决 vs 纯相似度阈值
@@ -91,7 +91,7 @@ MVP 场景与安全模型必须自洽：沙箱策略是"禁网 + 只读 + 资源
 |----|------|--------|------|
 | ① 静态层 | AST 解析 impl：import 白名单（23 模块）、builtin 黑名单（eval/exec/open/getattr/...）、双下划线属性与字符串常量封禁、**内建函数别名封禁**（`f = open`）、相对导入封禁 | LLM 生成物的绝大多数危险用法 | 代码可静态扫描，但存在结构性盲区（见下） |
 | ② 运行时命名空间层 | runner 给技能模块注入**受限内建字典**：eval/exec/open/getattr/... 在技能命名空间中**不存在**（引用即 NameError 显式失败）；`__import__` 换成白名单守卫版 | 静态层的全部已知盲区：内建别名（`f = open`、`l = [open]`）、字符串拼接动态调用 | CPython 的 builtin `eval` **不触发审计事件**，必须从命名空间层面移除 |
-| ③ 运行时审计层 | runner 安装 **PEP 578 audit hook**（默认拒绝）：exec("源码")/eval、非白名单 import（按"模块文件是否位于解释器目录"判定，放行 `_hashlib` 等传递性标准库依赖、拒绝 site-packages）、**文件写入全禁**、技能目录/解释器目录外读取全禁、`os.*/socket.*/subprocess.*/ctypes.*/urllib.*` 系统调用全禁 | 静态层+命名空间层仍漏掉的动态绕过；钩子一旦安装无法被技能代码移除 | 审计事件有覆盖边界，故不作为唯一防线 |
+| ③ 运行时审计层 | runner 安装 **PEP 578 audit hook**（默认拒绝）：exec("源码")/eval、非白名单 import（`sys.stdlib_module_names` + 危险标准库排除表 + 文件路径判定）、**文件写入全禁**、技能目录/解释器目录外读取全禁、`os.*/subprocess.*/ctypes.*` 全禁；**网络按 egress 白名单域名放行**（socket.getaddrinfo / http.client.connect+send / urllib.Request 四点校验，注入的 `http_get/http_post` 为唯一出站通道） | 静态层+命名空间层仍漏掉的动态绕过；钩子一旦安装无法被技能代码移除 | 审计事件有覆盖边界（如 eval 无事件），故不作为唯一防线 |
 | ④ 资源层 | **内存看门狗**（每 50ms 聚合子进程树的 PrivateUsage，超 256MB 杀整棵树）+ Windows Job Object（内存/进程数上限 + kill-on-close）+ 超时杀树 | 内存炸弹、fork 炸弹、死循环、孤儿进程 | Job Object 在进程已被外部 Job 托管时降级，看门狗兜底；两者独立生效 |
 | ⑤ 生产层 | DockerExecutor（已实装）：`--network none --read-only --memory 256m --pids-limit 64 --no-new-privileges`，runner 零第三方依赖可直接跑裸 python 镜像 | 内核级隔离全部前四层的残余风险 | 需安装 Docker；local/docker 双后端跑同一评测脚本出对比数据 |
 
