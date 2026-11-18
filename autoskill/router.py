@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from .config import Settings
@@ -41,6 +43,9 @@ class RouterError(RuntimeError):
     """裁决输出无法解析（重试后仍失败）。"""
 
 
+CACHE_SIZE = 256
+
+
 class Router:
     def __init__(self, registry: SkillRegistry, store: BaseStore, embedder, llm: LLMClient, settings: Settings):
         self.registry = registry
@@ -48,8 +53,34 @@ class Router:
         self.embedder = embedder
         self.llm = llm
         self.settings = settings
+        # 路由结果 LRU 缓存：相同需求免 embed+裁决（复用路径毫秒级）；
+        # 池变更（注册/熔断/重建）时由 service 调 invalidate() 失效
+        self._cache: OrderedDict[str, RouteResult] = OrderedDict()
+        self._cache_lock = threading.Lock()
+
+    def invalidate(self) -> None:
+        """技能池发生变化时清空路由缓存。"""
+        with self._cache_lock:
+            self._cache.clear()
 
     def route(self, requirement: str) -> RouteResult:
+        key = (requirement or "").strip()
+        if key:
+            with self._cache_lock:
+                cached = self._cache.get(key)
+                if cached is not None:
+                    self._cache.move_to_end(key)
+                    return cached
+
+        result = self._route_uncached(requirement)
+
+        with self._cache_lock:
+            self._cache[key] = result
+            while len(self._cache) > CACHE_SIZE:
+                self._cache.popitem(last=False)
+        return result
+
+    def _route_uncached(self, requirement: str) -> RouteResult:
         embedding = self.embedder.embed([requirement])[0]
         hits = self.store.query(embedding, k=self.settings.top_k, where={"status": ACTIVE})
         candidates = []

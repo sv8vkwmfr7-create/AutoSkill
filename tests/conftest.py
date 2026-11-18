@@ -9,7 +9,6 @@ if str(ROOT) not in sys.path:
 
 from autoskill.config import Settings  # noqa: E402
 from autoskill.service import AutoSkillService  # noqa: E402
-from autoskill.vectorstore import VecHit  # noqa: E402
 
 
 class FakeLLM:

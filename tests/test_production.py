@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from autoskill.config import Settings
 from autoskill.service import AutoSkillService
 
-from .conftest import ADD_SKILL, FakeLLM, make_service
+from .conftest import ADD_SKILL, FakeLLM, FakeStore, make_service
 
 
 class TestStartupValidation:
@@ -48,7 +48,7 @@ class TestEventLog:
         assert call_evt["ok"] is True
         # JSONL 文件可解析
         lines = (tmp_path / "data" / "events.jsonl").read_text(encoding="utf-8").strip().splitlines()
-        assert all(isinstance(json.loads(l), dict) for l in lines)
+        assert all(isinstance(json.loads(line), dict) for line in lines)
 
     def test_failure_logged_with_error(self, tmp_path):
         svc = make_service(tmp_path, llm=FakeLLM([]))
@@ -128,6 +128,102 @@ class TestConcurrentGeneration:
             t.join(timeout=30)
         assert svc.registry.get("boom").fail_streak == 6
         assert svc.registry.get("boom").status == "quarantined"
+
+
+class TestShadowGate:
+    """升级/修复的影子验证门禁：候选通过真实参数执行才热替换，失败自动回滚。"""
+
+    def _quarantined_skill(self, svc, name="repair_me"):
+        svc.registry.register(
+            name=name,
+            description="把字符串重复 repeat 次的演示技能",
+            tags=["string"],
+            params_schema={"type": "object", "properties": {"text": {"type": "string"}, "repeat": {"type": "integer"}},
+                           "required": ["text", "repeat"]},
+            impl_code="def run(params):\n    raise ValueError('v1 broken')\n",
+            tests=[],
+        )
+        svc._index_skill(svc.registry.get(name))
+        for _ in range(3):
+            svc.registry.record_failure(name)
+        return name
+
+    V2_GOOD = {
+        "name": "repair_me",
+        "description": "把字符串重复 repeat 次的演示技能",
+        "tags": ["string"],
+        "params": {"type": "object", "properties": {"text": {"type": "string"}, "repeat": {"type": "integer"}},
+                   "required": ["text", "repeat"]},
+        "impl_code": "def run(params):\n    return params['text'] * params['repeat']\n",
+        "tests": [
+            {"input": {"text": "ab", "repeat": 3}, "expected": "ababab"},
+            {"input": {"text": "x", "repeat": 1}, "expected": "x"},
+            {"input": {"text": "", "repeat": 4}, "expected": ""},
+        ],
+    }
+
+    def test_repair_shadow_promote(self, tmp_path):
+        svc = make_service(tmp_path, llm=FakeLLM([]))
+        name = self._quarantined_skill(svc)
+        from autoskill.vectorstore import VecHit
+
+        svc.router.store = FakeStore(hits=[VecHit(id=name, document="", metadata={"status": "quarantined"}, sim=0.3)])
+        fake = FakeLLM([self.V2_GOOD, {"params": {"text": "ab", "repeat": 3}}])
+        svc.set_llm(fake)
+        r = svc.ensure("把字符串 ab 重复 3 次")
+        assert r.ok, r.error
+        assert r.output == "ababab"
+        meta = svc.registry.get(name)
+        assert meta.version == 2 and meta.status == "active"
+        assert r.detail.get("shadow_gate") is True
+
+    def test_repair_shadow_rollback(self, tmp_path):
+        """候选 v2 通过自测、但对真实需求输入失败 -> 影子门禁拦截，不晋升，自动回滚保持 v1 隔离。"""
+        svc = make_service(tmp_path, llm=FakeLLM([]))
+        name = self._quarantined_skill(svc)
+        from autoskill.vectorstore import VecHit
+
+        svc.router.store = FakeStore(hits=[VecHit(id=name, document="", metadata={"status": "quarantined"}, sim=0.3)])
+        bad = dict(self.V2_GOOD)
+        # 通过自身 3 组自测（ab/3, x/1, ""/4），但对真实输入 text="xy" 抛错
+        bad["impl_code"] = (
+            "def run(params):\n"
+            "    if params['text'] == 'xy':\n"
+            "        raise ValueError('v2 bug on xy')\n"
+            "    return params['text'] * params['repeat']\n"
+        )
+        fake = FakeLLM([bad, {"params": {"text": "xy", "repeat": 2}}])
+        svc.set_llm(fake)
+        r = svc.ensure("把字符串 xy 重复 2 次")
+        assert not r.ok
+        assert "回滚" in r.error
+        meta = svc.registry.get(name)
+        assert meta.version == 1 and meta.status == "quarantined"  # 自动回滚生效
+        assert r.detail.get("shadow_rollback") is True
+
+    def test_route_cache_hit_and_invalidate(self, tmp_path):
+        """相同需求二次路由走缓存（不消耗 LLM 调用）；池变更后缓存失效。"""
+        decision = {"decision": "use", "skill": "add_numbers", "params": {"a": 1, "b": 2}, "reason": "命中"}
+        fake = FakeLLM([], default=decision)
+        svc = make_service(tmp_path, llm=fake)
+        svc.registry.register(
+            name="add_numbers",
+            description=ADD_SKILL["description"],
+            tags=ADD_SKILL["tags"],
+            params_schema=ADD_SKILL["params"],
+            impl_code=ADD_SKILL["impl_code"],
+            tests=[],
+        )
+        svc._index_skill(svc.registry.get("add_numbers"))
+        r1 = svc.router.route("计算 1 加 2")
+        assert r1.hit
+        assert len(fake.calls) == 1
+        r2 = svc.router.route("计算 1 加 2")
+        assert r2.hit and r2.skill == "add_numbers"
+        assert len(fake.calls) == 1  # 第二次走缓存，未消耗 LLM 调用
+        svc._index_skill(svc.registry.get("add_numbers"))  # 池变更
+        svc.router.route("计算 1 加 2")
+        assert len(fake.calls) == 2  # 缓存已失效，重新裁决
 
 
 class TestAPI:

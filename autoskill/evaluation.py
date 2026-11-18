@@ -17,7 +17,6 @@ import platform
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 from .config import PROJECT_ROOT, Settings
 from .schemas import match_expected as _match

@@ -12,8 +12,6 @@ from __future__ import annotations
 import json
 import logging
 import tempfile
-import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -98,7 +96,7 @@ class Generator:
             feedback = (
                 f"\n\n【第 {attempt} 次尝试失败，阶段={outcome.error_kind}，请修复后重新输出完整 JSON（全量，不是 diff）】\n"
                 f"错误详情：\n{outcome.error}\n"
-                + (f"违规清单：\n" + "\n".join(f"- {v}" for v in outcome.violations) + "\n" if outcome.violations else "")
+                + ("违规清单：\n" + "\n".join(f"- {v}" for v in outcome.violations) + "\n" if outcome.violations else "")
             )
         return outcome
 

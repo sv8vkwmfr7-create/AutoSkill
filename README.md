@@ -73,7 +73,8 @@ python -m autoskill eval          # 种子 10 + 池内改述 10 + 池外生成 1
 - 架构与设计取舍：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；面试高频问题：[docs/qa.md](docs/qa.md)；现场演示：[docs/DEMO.md](docs/DEMO.md)
 - **部署运维手册**（直跑 / Docker 沙箱两种拓扑、systemd、备份恢复）：[docs/DEPLOY.md](docs/DEPLOY.md)
 - **工程级落地自评报告**（八维度实测证据与边界声明）：[docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md)
-- 工程化能力：并发安全（生成锁 + 双检路由）、事件审计轨迹（`/events`）、启动配置校验（快速失败）、全局异常结构化、`pyproject.toml` 打包（`autoskill` 命令）、Dockerfile（构建期跑测试）、GitHub Actions CI、一键自检 `selfcheck`（独立临时池、幂等）
+- 工程化能力：并发安全（生成锁 + 双检路由）、**影子灰度 + 自动回滚**（升级候选先影子执行，未通过不热替换）、**Token 成本统计**（逐操作用量进事件日志）、**路由缓存**（池变更自动失效）、事件审计轨迹（`/events`）、启动配置校验（快速失败）、全局异常结构化、`pyproject.toml` 打包（`autoskill` 命令）、Dockerfile（构建期跑测试）、GitHub Actions CI（ruff 门禁 + 覆盖率）、一键自检 `selfcheck`（独立临时池、幂等）
+- 执行器对比基准：`python scripts/bench_executors.py`（local vs docker 同需求复跑，输出 `eval/bench_executors.md`）
 
 ## 目录结构
 
@@ -95,7 +96,8 @@ autoskill/            核心包
 eval/evalset.json     评测集（人工期望值，冻结）
 skills/               技能库（运行时生成：<name>/v{n}/impl.py + skill.json）
 docs/                 架构文档 / 面试 Q&A
-tests/                pytest（94 用例，全离线）
+tests/                pytest（97 用例，全离线）
+scripts/              执行器对比基准（local vs docker）
 ```
 
 ## 已知限制（MVP 边界）

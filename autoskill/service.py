@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .config import Settings
@@ -28,7 +30,7 @@ from .executor import Executor, make_executor
 from .generator import Generator
 from .llm import LLMClient
 from .registry import SkillRegistry
-from .router import RouteResult, Router, RouterError
+from .router import RouteResult, Router
 from .schemas import ACTIVE, QUARANTINED, validate_params
 from .vectorstore import BaseStore, make_vector_store
 
@@ -113,6 +115,16 @@ class AutoSkillService:
         )
 
     # ---- 事件审计轨迹 -----------------------------------------------------------
+    def _usage_snapshot(self) -> dict | None:
+        usage = getattr(self.llm, "usage", None)
+        return dict(usage) if isinstance(usage, dict) else None
+
+    def _usage_delta(self, before: dict | None) -> dict | None:
+        now = self._usage_snapshot()
+        if before is None or now is None:
+            return None
+        return {k: now[k] - before.get(k, 0) for k in now}
+
     def _log_event(self, kind: str, **fields: Any) -> None:
         try:
             record = {"ts": round(time.time(), 3), "kind": kind, **fields}
@@ -199,13 +211,14 @@ class AutoSkillService:
             self._log_event("call", **result.as_dict())
             return result
         exec_res = self._execute(meta, params)
+        usage_before = self._usage_snapshot()
         if exec_res.ok:
             self.registry.record_success(name)
             result = CallResult(ok=True, skill=name, output=exec_res.data, duration_s=exec_res.duration_s)
         else:
             self._after_failure(meta, exec_res.error)
             result = CallResult(ok=False, skill=name, error=exec_res.error, duration_s=exec_res.duration_s)
-        self._log_event("call", **result.as_dict())
+        self._log_event("call", **result.as_dict(), usage=self._usage_delta(usage_before))
         return result
 
     # ---- 全链路 ensure -----------------------------------------------------------
@@ -219,16 +232,19 @@ class AutoSkillService:
         t0 = time.monotonic()
         timings: dict[str, float] = {}
         detail: dict[str, Any] = {}
+        usage_before = self._usage_snapshot()
         try:
             result = self._ensure_inner(requirement, t0, timings, detail)
         except Exception as e:  # noqa: BLE001 - 记录后向上抛（API 层结构化）
             self._log_event("ensure", ok=False, error=str(e)[:300],
-                            elapsed_s=round(time.monotonic() - t0, 3))
+                            elapsed_s=round(time.monotonic() - t0, 3),
+                            usage=self._usage_delta(usage_before))
             raise
         self._log_event(
             "ensure", ok=result.ok, path=result.path, skill=result.skill,
             rounds=result.rounds, error=(result.error or "")[:200],
             elapsed_s=round(result.elapsed_s.get("total_s", 0.0), 3),
+            usage=self._usage_delta(usage_before),
         )
         return result
 
@@ -284,6 +300,11 @@ class AutoSkillService:
                     detail=detail,
                 )
 
+            old_meta = self.registry.get(gen.skill.name)
+            if old_meta is not None:
+                # 升级/修复：影子验证门禁 —— 候选版本先用真实需求参数执行，通过才热替换；失败自动回滚
+                return self._promote_with_shadow(requirement, gen, old_meta, target_name, timings, detail, t0)
+
             meta = self.registry.register(
                 name=gen.skill.name,
                 description=gen.skill.description,
@@ -291,7 +312,7 @@ class AutoSkillService:
                 params_schema=gen.skill.params,
                 impl_code=gen.skill.impl_code,
                 tests=gen.skill.tests,
-                note=("auto-repair v2" if target_name else "auto-generated"),
+                note="auto-generated",
             )
             self._index_skill(meta)
             detail["version"] = meta.version
@@ -391,6 +412,77 @@ class AutoSkillService:
         return None
 
     # ---- 内部 -----------------------------------------------------------
+    def _promote_with_shadow(self, requirement: str, gen, old_meta, target_name: str | None,
+                             timings: dict, detail: dict, t0: float) -> EnsureResult:
+        """升级/修复的影子验证门禁：候选版本先用真实需求参数执行，通过才热替换；
+        未通过则自动回滚（生效版本保持不变，状态保持 quarantined 等待下一轮修复）。"""
+        import shutil
+        from types import SimpleNamespace
+
+        name = gen.skill.name
+        version = self.registry.stage_files(name, gen.skill.impl_code, gen.skill.tests)
+        detail["candidate_version"] = version
+
+        cand_meta = SimpleNamespace(name=name, params_schema=gen.skill.params, description=gen.skill.description)
+        params, arg_err = self._extract_args(requirement, cand_meta, None)
+        if params is None:
+            return EnsureResult(
+                ok=False,
+                path="generated",
+                skill=name,
+                error=f"候选 v{version} 已产出但参数提取失败（保持 v{old_meta.version} 生效）: {arg_err}",
+                rounds=max(gen.rounds - 1, 0),
+                elapsed_s=self._elapsed(t0, timings),
+                detail=detail,
+            )
+
+        # 影子执行：在临时目录把 skill.json 的 version 指向候选版本（对运行时不可见）
+        staging = Path(tempfile.mkdtemp(prefix="autoskill_shadow_"))
+        try:
+            dst = staging / name
+            shutil.copytree(self.registry.skill_dir(name), dst)
+            meta_path = dst / "skill.json"
+            meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta_data["version"] = version
+            meta_path.write_text(json.dumps(meta_data, ensure_ascii=False), encoding="utf-8")
+            exec_res = self.executor.execute(dst, params, timeout_s=self.settings.exec_timeout_s)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        timings["exec_s"] = exec_res.duration_s
+
+        if not exec_res.ok:
+            # 自动回滚：候选未通过影子验证，生效版本保持不变
+            detail["shadow_rollback"] = True
+            logger.warning("候选 v%d 影子验证失败，自动回滚保持 v%d 生效: %s",
+                           version, old_meta.version, exec_res.error[:150])
+            return EnsureResult(
+                ok=False,
+                path="generated",
+                skill=name,
+                error=f"候选 v{version} 影子执行失败，已自动回滚保持 v{old_meta.version} 生效: {exec_res.error[:300]}",
+                rounds=max(gen.rounds - 1, 0),
+                elapsed_s=self._elapsed(t0, timings),
+                detail=detail,
+            )
+
+        meta = self.registry.promote(
+            name, version,
+            note=("auto-repair shadow v2" if target_name else "shadow-promoted upgrade"),
+        )
+        self._index_skill(meta)
+        detail["version"] = meta.version
+        detail["shadow_gate"] = True
+        self.registry.record_success(name)
+        return EnsureResult(
+            ok=True,
+            path="generated",
+            skill=name,
+            output=exec_res.data,
+            rounds=max(gen.rounds - 1, 0),
+            elapsed_s=self._elapsed(t0, timings),
+            detail=detail,
+        )
+
     def _execute(self, meta, params: dict):
         return self.executor.execute(
             self.registry.skill_dir(meta.name), params, timeout_s=self.settings.exec_timeout_s
@@ -440,6 +532,7 @@ class AutoSkillService:
             [meta.description],
             [{"name": meta.name, "status": meta.status, "version": meta.version}],
         )
+        self.router.invalidate()  # 池变更使路由缓存失效
 
     @staticmethod
     def _elapsed(t0: float, timings: dict) -> dict:

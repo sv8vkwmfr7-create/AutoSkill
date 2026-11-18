@@ -36,6 +36,8 @@
 
 ### 3. 并发安全 ✅（本轮新增）
 
+> 追加（第三轮改善）：升级/修复路径引入**影子灰度门禁**——候选版本先用真实需求参数执行，通过才热替换，未通过自动回滚保持原版本（`test_repair_shadow_promote` / `test_repair_shadow_rollback`）；新增路由 LRU 缓存（池变更自动失效）与 **Token 成本统计**（`events.jsonl` 逐操作记录 calls/prompt/completion，实测示例：生成一个技能约 2~5 次 LLM 调用、1k~3k 输入 + 3k~7k 输出 token）。
+
 - 全局生成锁 + 获锁后二次路由：3 线程并发 ensure 同一意图 → **只生成一次**（`test_concurrent_ensure_generates_once`）
 - 召回失败复核跳过：同轮 ensure 不重复执行已失败的坏技能（skip 集）
 - 注册表/熔断计数/事件日志均有锁；向量库本地实现带锁、Chroma 按官方线程语义使用
@@ -67,6 +69,7 @@
 - 冻结评测集（35 条人工期望值）作为回归基线：任何改动 `python -m autoskill eval` 一键对账；已跨两个供应商复跑验证
 - 文档：README（5 分钟复现）/ ARCHITECTURE（含五层安全模型与三个 trade-off）/ qa（12 条）/ DEMO（现场命令）/ DEPLOY（部署运维）/ PRODUCTION-READINESS（本文）
 - 代码分层清晰：路由/生成/注册表/执行器/存储互相通过窄接口耦合，执行器可插拔（local/docker），LLM/Embedding/向量库均可配置切换
+- 质量门禁：CI 集成 ruff 静态检查与 pytest-cov 覆盖率；执行器对比基准脚本（`scripts/bench_executors.py`，local/docker 双后端同需求复跑）
 
 ### 8. 性能 ✅（单机规模）
 

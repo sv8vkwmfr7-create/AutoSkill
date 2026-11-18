@@ -1,7 +1,6 @@
 """本地子进程执行器：协议通信、schema 拦截、异常转译、超时杀树、print 污染防护。"""
 
 import json
-import sys
 
 import pytest
 

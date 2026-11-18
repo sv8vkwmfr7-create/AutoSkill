@@ -52,6 +52,8 @@ class LLMClient:
         self.settings = settings
         self._client = None
         self._json_mode_ok = settings.llm_json_mode
+        # 累计 token 用量（成本统计：events.jsonl 逐操作记录差值）
+        self.usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
     @property
     def client(self):
@@ -79,6 +81,11 @@ class LLMClient:
                     kwargs["response_format"] = {"type": "json_object"}
                 resp = self.client.chat.completions.create(**kwargs)
                 choice = resp.choices[0]
+                usage = getattr(resp, "usage", None)
+                if usage is not None:
+                    self.usage["calls"] += 1
+                    self.usage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+                    self.usage["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
                 if getattr(choice, "finish_reason", None) == "length":
                     raise LLMFormatError(
                         f"输出被 max_tokens={kwargs.get('max_tokens')} 截断，请精简内容后重新输出",
@@ -98,6 +105,9 @@ class LLMClient:
 
                     time.sleep(1.5 * (attempt + 1))
         raise LLMError(f"LLM 调用失败（已重试）: {last_err}") from last_err
+
+    def snapshot_usage(self) -> dict:
+        return dict(self.usage)
 
     def chat_json(self, system: str, user: str, temperature: float | None = None, max_tokens: int = 4000) -> dict:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]

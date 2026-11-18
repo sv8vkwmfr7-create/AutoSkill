@@ -84,6 +84,39 @@ class SkillRegistry:
             return meta, quarantined_now
 
     # ---- 注册 / 版本 ---------------------------------------------------------
+    def stage_files(self, name: str, impl_code: str, tests: list[dict]) -> int:
+        """写入候选版本目录 v(N+1)，**不改变生效版本**（影子验证用）。
+
+        返回候选版本号。候选目录在生效版本切换前对运行时不可见
+        （runner 只读 skill.json 的 version）。
+        """
+        with self._lock:
+            meta = self._skills.get(name)
+            if meta is None:
+                raise ValueError(f"技能不存在: {name}")
+            version = meta.version + 1
+            vdir = self.skill_dir(name) / f"v{version}"
+            vdir.mkdir(parents=True, exist_ok=True)
+            (vdir / "impl.py").write_text(impl_code, encoding="utf-8")
+            (vdir / "tests.json").write_text(json.dumps(tests, ensure_ascii=False, indent=2), encoding="utf-8")
+            return version
+
+    def promote(self, name: str, version: int, note: str = "") -> SkillMeta:
+        """把候选版本设为生效版本（热替换）：status 回 active、熔断计数清零。"""
+        with self._lock:
+            meta = self._skills.get(name)
+            if meta is None:
+                raise ValueError(f"技能不存在: {name}")
+            now = time.time()
+            meta.version = version
+            meta.status = ACTIVE
+            meta.fail_streak = 0
+            meta.history.append({"version": version, "created_at": now, "note": note})
+            meta.updated_at = now
+            self._persist(meta)
+            logger.info("技能生效版本切换: %s v%d (%s)", name, version, note or "promoted")
+            return meta
+
     def register(
         self,
         name: str,

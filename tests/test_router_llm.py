@@ -2,7 +2,7 @@
 
 import pytest
 
-from autoskill.router import Router, RouterError
+from autoskill.router import RouterError
 from autoskill.vectorstore import VecHit
 
 from .conftest import ADD_SKILL, FakeLLM, FakeStore, make_service
