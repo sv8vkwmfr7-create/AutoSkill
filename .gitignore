@@ -11,3 +11,4 @@ skills/
 serve*.log
 eval_run*.log
 autoskill.egg-info/
+site/

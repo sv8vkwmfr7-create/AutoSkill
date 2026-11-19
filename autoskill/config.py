@@ -83,6 +83,11 @@ class Settings:
     rollback_min_successes: int = 2  # 晋升后连续成功达标 -> 记为已验证稳定（自动回退目标）
     # egress 白名单（HTTP 类技能可访问的域名；默认空 = 全禁网，与既有安全模型一致）
     egress_hosts: list[str] = field(default_factory=list)
+    # 公网化三件套（部署网页展示时使用；默认关闭 = 本机开发行为不变）
+    daily_token_budget: int = 0  # 当日 LLM token 总预算，0 = 不限；超限后 ensure/agent 显式拒绝
+    rate_limit_per_hour: int = 0  # 每 IP 每小时 ensure/agent 请求数上限，0 = 不限
+    showcase: bool = False  # 演示模式：/ui 显示横幅，Agent 对话默认关闭（可用 token 门放行）
+    showcase_token: str = ""  # 演示模式下 Agent 对话的放行令牌（空 = Agent 直接关闭）
 
     # Agent
     agent_max_rounds: int = 5
@@ -120,5 +125,9 @@ class Settings:
             breaker_threshold=_env_int("AUTOSKILL_BREAKER_THRESHOLD", 3),
             rollback_min_successes=_env_int("AUTOSKILL_ROLLBACK_MIN_SUCCESSES", 2),
             egress_hosts=[h.strip().lower() for h in _env("AUTOSKILL_EGRESS_HOSTS", "").split(",") if h.strip()],
+            daily_token_budget=_env_int("AUTOSKILL_DAILY_TOKEN_BUDGET", 0),
+            rate_limit_per_hour=_env_int("AUTOSKILL_RATE_LIMIT_PER_HOUR", 0),
+            showcase=_env("AUTOSKILL_SHOWCASE", "0") in ("1", "true", "yes"),
+            showcase_token=_env("AUTOSKILL_SHOWCASE_TOKEN", ""),
             agent_max_rounds=_env_int("AUTOSKILL_AGENT_MAX_ROUNDS", 5),
         )

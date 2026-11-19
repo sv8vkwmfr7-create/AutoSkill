@@ -24,9 +24,13 @@ class FakeLLM:
         self.default = default
         self._copy = copy
         self.calls = []
+        self.usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
     def chat_json(self, system, user, temperature=None, max_tokens=4000):
         self.calls.append({"system": system, "user": user})
+        self.usage["calls"] += 1
+        self.usage["prompt_tokens"] += 120 + len(user) // 4
+        self.usage["completion_tokens"] += 60
         if self.script:
             item = self.script.pop(0)
             if isinstance(item, Exception):

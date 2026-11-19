@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import tempfile
@@ -36,6 +37,15 @@ from .schemas import ACTIVE, QUARANTINED, validate_params
 from .vectorstore import BaseStore, make_vector_store
 
 logger = logging.getLogger("autoskill.service")
+
+
+class BudgetExceeded(RuntimeError):
+    """当日 LLM token 预算耗尽（公网展示模式的费用护栏）。"""
+
+    def __init__(self, used: int, budget: int):
+        super().__init__(f"今日演示额度已用尽（{used}/{budget} tokens），明日自动恢复")
+        self.used = used
+        self.budget = budget
 
 ARGS_SYSTEM = """你是 AutoSkill 的参数提取器。给定技能的 JSON Schema 参数定义与用户需求，从需求中抽取参数值。
 只输出 JSON 对象：{"params": {...}}，键与 schema 的 properties 一致，类型严格匹配。不要输出任何解释。"""
@@ -130,6 +140,33 @@ class AutoSkillService:
         if before is None or now is None:
             return None
         return {k: now[k] - before.get(k, 0) for k in now}
+
+    def _today_token_usage(self) -> int:
+        """从事件轨迹统计当日（本地时区 0 点起）LLM token 总消耗。"""
+        midnight = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        total = 0
+        for path in (self._events_path.with_suffix(".jsonl.1"), self._events_path):
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8").strip().splitlines():
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (e.get("ts") or 0) < midnight:
+                    continue
+                usage = e.get("usage") or {}
+                total += (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)
+        return total
+
+    def check_budget(self) -> None:
+        """每日 token 预算护栏（>0 时生效）；超限抛 BudgetExceeded（API 层转 429）。"""
+        budget = self.settings.daily_token_budget
+        if budget <= 0:
+            return
+        used = self._today_token_usage()
+        if used >= budget:
+            raise BudgetExceeded(used, budget)
 
     _EVENTS_MAX_BYTES = 5 * 1024 * 1024
 
@@ -244,6 +281,7 @@ class AutoSkillService:
             self._log_event("ensure", **result.as_dict())
             return result
 
+        self.check_budget()
         t0 = time.monotonic()
         timings: dict[str, float] = {}
         detail: dict[str, Any] = {}

@@ -12,13 +12,13 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
 from .agent import Agent
-from .service import AutoSkillService
+from .service import AutoSkillService, BudgetExceeded
 from .ui import UI_HTML
 
 logger = logging.getLogger("autoskill.api")
@@ -47,14 +47,37 @@ def create_app(service: AutoSkillService | None = None) -> FastAPI:
     jobs: dict[str, dict] = {}
     jobs_lock = threading.Lock()
 
+    # 公网化三件套之二：每 IP 限流（滑动窗口，内存态）
+    settings = svc.settings
+    rate_limit = settings.rate_limit_per_hour
+    rate_map: dict[str, list[float]] = {}
+    rate_lock = threading.Lock()
+
+    def _rate_guard(request: Request) -> None:
+        if rate_limit <= 0:
+            return
+        ip = request.client.host if request.client else "unknown"
+        now = time.time()
+        with rate_lock:
+            window = [t for t in rate_map.get(ip, []) if now - t < 3600.0]
+            if len(window) >= rate_limit:
+                svc.metrics.inc("rate_limited_total")
+                raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试（演示限流）")
+            window.append(now)
+            rate_map[ip] = window
+
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request, exc):  # pragma: no cover - 兜底路径
         logger.exception("未处理异常 %s", request.url.path)
         return JSONResponse(status_code=500, content={"ok": False, "error": f"服务内部错误: {exc}"})
 
     @app.post("/ensure")
-    def ensure(req: EnsureRequest) -> dict:
-        result = svc.ensure(req.requirement)
+    def ensure(request: Request, req: EnsureRequest) -> dict:
+        _rate_guard(request)
+        try:
+            result = svc.ensure(req.requirement)
+        except BudgetExceeded as e:
+            raise HTTPException(status_code=429, detail=str(e)) from e
         return result.as_dict()
 
     @app.post("/skills/{name}/call")
@@ -79,9 +102,19 @@ def create_app(service: AutoSkillService | None = None) -> FastAPI:
         return svc.events(limit=max(1, min(limit, 500)))
 
     @app.post("/agent/chat")
-    def agent_chat(req: AgentRequest) -> dict:
+    def agent_chat(request: Request, req: AgentRequest) -> dict:
+        _rate_guard(request)
+        if settings.showcase:
+            token = request.headers.get("x-showcase-token", "")
+            if not settings.showcase_token or token != settings.showcase_token:
+                raise HTTPException(
+                    status_code=403,
+                    detail="演示模式下 Agent 对话已关闭（操作员可配置 AUTOSKILL_SHOWCASE_TOKEN 放行）",
+                )
         try:
             reply = Agent(svc).chat(req.message, history=req.history)
+        except BudgetExceeded as e:
+            raise HTTPException(status_code=429, detail=str(e)) from e
         except Exception as e:  # noqa: BLE001
             logger.exception("agent 失败")
             raise HTTPException(status_code=502, detail=f"agent 调用失败: {e}") from e
@@ -93,8 +126,9 @@ def create_app(service: AutoSkillService | None = None) -> FastAPI:
         return PlainTextResponse(svc.metrics.render(), media_type="text/plain; version=0.0.4")
 
     @app.post("/ensure/async")
-    def ensure_async(req: EnsureRequest) -> dict:
+    def ensure_async(request: Request, req: EnsureRequest) -> dict:
         """长任务异步化：立即返回 job_id，避免 60s 级生成占用 HTTP 连接。"""
+        _rate_guard(request)
         job_id = uuid.uuid4().hex[:12]
         with jobs_lock:
             jobs[job_id] = {"job_id": job_id, "status": "queued",
@@ -132,14 +166,24 @@ def create_app(service: AutoSkillService | None = None) -> FastAPI:
 
     @app.get("/ui", response_class=HTMLResponse)
     def ui() -> HTMLResponse:
-        """Web 调试面板（单文件，零构建）。"""
-        return HTMLResponse(UI_HTML)
+        """Web 调试面板（单文件，零构建）；showcase 模式显示演示横幅。"""
+        html = UI_HTML
+        if settings.showcase:
+            html = html.replace(
+                "<!--SHOWCASE_BANNER-->",
+                '<div class="banner">🎓 演示模式：沙箱五层纵深已启用，每 IP 限流，'
+                "当日 LLM 额度用尽后接口返回 429</div>",
+            )
+        else:
+            html = html.replace("<!--SHOWCASE_BANNER-->", "")
+        return HTMLResponse(html)
 
     @app.get("/health")
     def health() -> dict:
         return {
             "status": "ok",
             "version": __version__,
+            "showcase": settings.showcase,
             "rebuild": rebuild,
             "skills": len(svc.list_skills()),
             "executor": svc.executor.healthcheck(),

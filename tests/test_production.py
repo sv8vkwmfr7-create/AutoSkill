@@ -131,6 +131,64 @@ class TestConcurrentGeneration:
         assert svc.registry.get("boom").status == "quarantined"
 
 
+class TestPublicGuard:
+    """公网化三件套：每日 token 预算、每 IP 限流、showcase 模式门禁。"""
+
+    def test_daily_budget_exceeded_raises(self, tmp_path):
+        fake = FakeLLM([ADD_SKILL, {"params": {"a": 2, "b": 3}}])
+        svc = make_service(tmp_path, llm=fake, daily_token_budget=1)
+        r1 = svc.ensure("计算 2 加 3 的和")
+        assert r1.ok
+        with pytest.raises(RuntimeError) as ei:
+            svc.ensure("再来一次")
+        assert "额度已用尽" in str(ei.value)
+
+    def test_budget_api_returns_429(self, tmp_path):
+        fake = FakeLLM([ADD_SKILL, {"params": {"a": 2, "b": 3}}])
+        svc = make_service(tmp_path, llm=fake, daily_token_budget=1)
+        from autoskill.api import create_app
+
+        client = TestClient(create_app(service=svc))
+        first = client.post("/ensure", json={"requirement": "计算 2 加 3 的和"})
+        assert first.status_code == 200
+        second = client.post("/ensure", json={"requirement": "再来一次"})
+        assert second.status_code == 429
+        assert "额度" in second.json()["detail"]
+
+    def test_rate_limit_per_ip(self, tmp_path):
+        fake = FakeLLM([], default={"decision": "use", "skill": "add_numbers",
+                                    "params": {"a": 1, "b": 2}, "reason": "x"})
+        svc = make_service(tmp_path, llm=fake, rate_limit_per_hour=2)
+        svc.registry.register(
+            name="add_numbers",
+            description=ADD_SKILL["description"],
+            tags=ADD_SKILL["tags"],
+            params_schema=ADD_SKILL["params"],
+            impl_code=ADD_SKILL["impl_code"],
+            tests=[],
+        )
+        svc._index_skill(svc.registry.get("add_numbers"))
+        from autoskill.api import create_app
+
+        client = TestClient(create_app(service=svc))
+        codes = [client.post("/ensure", json={"requirement": f"计算 1 加 {i}"}).status_code for i in range(3)]
+        assert codes == [200, 200, 429]
+        assert svc.metrics.snapshot().get("rate_limited_total") == 1
+
+    def test_showcase_agent_gated_without_token(self, tmp_path):
+        fake = FakeLLM([], default={"decision": "none", "skill": None, "params": {}, "reason": "x"})
+        svc = make_service(tmp_path, llm=fake, showcase=True, showcase_token="")
+        from autoskill.api import create_app
+
+        client = TestClient(create_app(service=svc))
+        r = client.post("/agent/chat", json={"message": "你好"})
+        assert r.status_code == 403
+        assert "演示模式" in r.json()["detail"]
+        ui = client.get("/ui")
+        assert "演示模式" in ui.text  # 横幅
+        assert client.get("/health").json()["showcase"] is True
+
+
 class TestAutoRollback:
     """熔断自动回退：晋升版本连续失败时，自动回归最近已验证稳定版本恢复服务。"""
 

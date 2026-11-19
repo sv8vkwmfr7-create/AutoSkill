@@ -24,9 +24,11 @@ UI_HTML = """<!DOCTYPE html>
   .row > * { flex:1; }
   #health { font-size:12px; color:var(--dim); }
   .msg { border-left:3px solid var(--accent); padding:6px 10px; margin:6px 0; font-size:13px; }
+  .banner { background:#3a2d1d; color:#ffd08a; padding:8px 14px; border-radius:8px; margin-bottom:14px; font-size:13px; }
 </style>
 </head>
 <body>
+<!--SHOWCASE_BANNER-->
 <h1>AutoSkill 控制台</h1>
 <div class="sub" id="health">加载中…</div>
 

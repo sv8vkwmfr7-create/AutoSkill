@@ -75,6 +75,22 @@ WantedBy=multi-user.target
 
 未处理异常由全局兜底转为结构化 500（不泄漏裸栈）。
 
+## 公网展示（showcase 模式）
+
+把服务暴露到公网前的三件套（全部已在代码内实现）：
+
+```ini
+AUTOSKILL_SHOWCASE=1                    # 演示横幅 + Agent 对话门禁
+AUTOSKILL_DAILY_TOKEN_BUDGET=200000     # 当日 LLM token 总预算（超限返回 429，次日自动恢复）
+AUTOSKILL_RATE_LIMIT_PER_HOUR=30        # 每 IP 每小时 ensure/agent 请求上限
+AUTOSKILL_SHOWCASE_TOKEN=your-secret    # 可选：配置后携带 X-Showcase-Token 头可使用 Agent 对话
+```
+
+- 预算从 `events.jsonl` 的 usage 统计当日消耗（跨轮转文件），超限显式 429——费用滥用不可能发生
+- 限流为每 IP 滑动窗口（内存态）；配额与预算均有 Prometheus 指标（`rate_limited_total`）
+- 沙箱侧：五层纵深 + 默认空 egress（公网用户注入的联网技能请求会被评测 C 组同款机制拦截）
+- 静态作品集：CI 自动把 `eval/report.json` 渲染为 GitHub Pages（`site/` → gh-pages 分支）
+
 ## 运维要点
 
 - **持久化数据**：`skills/`（技能源码与元数据，唯一事实源）+ `data/`（向量库、事件日志）。备份 = 打包这两个目录

@@ -33,6 +33,7 @@ class Agent:
         self.service = service
 
     def chat(self, message: str, history: list[dict] | None = None) -> AgentReply:
+        self.service.check_budget()
         llm = self.service.llm
         settings = self.service.settings
         tools = self.service.registry.tool_specs()
@@ -50,9 +51,16 @@ class Agent:
             if tools:
                 kwargs["tools"] = tools
             resp = llm.client.chat.completions.create(**kwargs)
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                self.service.metrics.inc("agent_llm_calls_total")
+                self.service._log_event("agent_llm", round=round_no,
+                                        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                                        completion_tokens=getattr(usage, "completion_tokens", 0) or 0)
             msg = resp.choices[0].message
             tool_calls = msg.tool_calls or []
             if not tool_calls:
+                self.service._log_event("agent", ok=True, rounds=round_no, steps=len(steps))
                 return AgentReply(content=(msg.content or "").strip(), steps=steps, rounds=round_no)
             messages.append(msg.model_dump(exclude_none=True))
             for call in tool_calls:
