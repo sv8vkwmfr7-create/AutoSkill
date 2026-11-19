@@ -1,6 +1,10 @@
 # AutoSkill：面向 Agent 的自进化技能生成与热加载系统
 
 > 普通 Agent 调用工具；AutoSkill 的 Agent **生产工具**。
+
+<p align="center"><img src="docs/assets/demo.gif" alt="熔断自修复演示" width="640"></p>
+
+<p align="center"><sub>熔断 → 自修复 → 影子验证 → 热替换：技能连续失败自动隔离，同类需求触发 v2 修复，全程无人工干预</sub></p>
 > 遇到技能池没有覆盖的需求时，系统自动生成工具函数，经静态安全校验与沙箱自测后入库热加载——无需重启服务，Agent 下一轮对话即可使用新技能。
 
 ```
@@ -53,7 +57,7 @@ python -m autoskill skills
 | `python -m autoskill skills` | 查看技能注册表（版本/状态/熔断计数） |
 | `python -m autoskill agent "<消息>"` | 单轮 Agent 对话（展示工具调用过程） |
 | `python -m autoskill rebuild` | 手动重建注册表 + 向量库对账 |
-| `python -m autoskill eval` | 批量评测（35 条人工期望值），输出 `eval/report.md` |
+| `python -m autoskill eval` | 批量评测（45 条人工期望值），输出 `eval/report.md` |
 | `python -m autoskill selfcheck` | 一键功能自检（六项核心链路，独立临时池、幂等） |
 
 HTTP API：`POST /ensure`、`POST /skills/{name}/call`、`GET /skills`、`GET /skills/{name}`、`GET /events`、`POST /agent/chat`、`GET /health`。

@@ -29,6 +29,7 @@ from .embeddings import make_embedder
 from .executor import Executor, make_executor
 from .generator import Generator
 from .llm import LLMClient
+from .metrics import Metrics
 from .registry import SkillRegistry
 from .router import RouteResult, Router
 from .schemas import ACTIVE, QUARANTINED, validate_params
@@ -106,9 +107,10 @@ class AutoSkillService:
         self.generator = Generator(self.llm, self.executor, self.settings)
         # 并发控制：全局生成锁（防并发 ensure 对同一意图重复生成；召回/调用不受影响）
         self._generation_lock = threading.Lock()
-        # 事件审计轨迹（JSONL，线程安全）
+        # 事件审计轨迹（JSONL，线程安全；超过 5MB 轮转为 .1）
         self._events_path = self.settings.data_dir / "events.jsonl"
         self._events_lock = threading.Lock()
+        self.metrics = Metrics()
         logger.info(
             "服务就绪: llm=%s store=%s embedding=%s executor=%s skills=%d",
             self.settings.llm_model,
@@ -129,10 +131,17 @@ class AutoSkillService:
             return None
         return {k: now[k] - before.get(k, 0) for k in now}
 
+    _EVENTS_MAX_BYTES = 5 * 1024 * 1024
+
     def _log_event(self, kind: str, **fields: Any) -> None:
         try:
             record = {"ts": round(time.time(), 3), "kind": kind, **fields}
             with self._events_lock:
+                if self._events_path.exists() and self._events_path.stat().st_size > self._EVENTS_MAX_BYTES:
+                    rotated = self._events_path.with_suffix(".jsonl.1")
+                    if rotated.exists():
+                        rotated.unlink()
+                    self._events_path.rename(rotated)  # 轮转：当前 -> .1（只保留一代）
                 with open(self._events_path, "a", encoding="utf-8") as fh:
                     fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
         except Exception:  # noqa: BLE001 - 观测失败不阻塞业务
@@ -222,6 +231,8 @@ class AutoSkillService:
         else:
             self._after_failure(meta, exec_res.error)
             result = CallResult(ok=False, skill=name, error=exec_res.error, duration_s=exec_res.duration_s)
+        self.metrics.inc(f"call_total_ok_{int(result.ok)}")
+        self.metrics.observe("call_duration_seconds", result.duration_s)
         self._log_event("call", **result.as_dict(), usage=self._usage_delta(usage_before))
         return result
 
@@ -244,10 +255,13 @@ class AutoSkillService:
                             elapsed_s=round(time.monotonic() - t0, 3),
                             usage=self._usage_delta(usage_before))
             raise
+        elapsed_total = result.elapsed_s.get("total_s", 0.0)
+        self.metrics.inc(f"ensure_total_path_{result.path}_ok_{int(result.ok)}")
+        self.metrics.observe("ensure_duration_seconds", elapsed_total)
         self._log_event(
             "ensure", ok=result.ok, path=result.path, skill=result.skill,
             rounds=result.rounds, error=(result.error or "")[:200],
-            elapsed_s=round(result.elapsed_s.get("total_s", 0.0), 3),
+            elapsed_s=round(elapsed_total, 3),
             usage=self._usage_delta(usage_before),
         )
         return result
@@ -289,6 +303,10 @@ class AutoSkillService:
             t = time.monotonic()
             gen = self.generator.generate(requirement, target_name=target_name)
             timings["generate_s"] = time.monotonic() - t
+            self.metrics.observe("generation_duration_seconds", timings["generate_s"])
+            self.metrics.inc("generation_rounds_total", max(gen.rounds - 1, 0))
+            if not gen.ok:
+                self.metrics.inc(f"generation_fail_kind_{gen.error_kind or 'unknown'}")
             detail["generate_kind"] = gen.error_kind
             detail["generate_violations"] = gen.violations
             if not gen.ok:
@@ -499,6 +517,7 @@ class AutoSkillService:
     def _after_failure(self, meta, error: str) -> None:
         updated, quarantined_now = self.registry.record_failure(meta.name)
         if quarantined_now and updated is not None:
+            self.metrics.inc("breaker_trips_total")
             self._index_skill(updated)  # 同步向量库元数据，路由立即排除
             logger.warning("技能 %s 已熔断并从路由排除", meta.name)
 

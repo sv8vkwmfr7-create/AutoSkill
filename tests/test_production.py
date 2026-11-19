@@ -1,7 +1,9 @@
 """工程化测试：启动校验、事件审计轨迹、并发生成锁、API 端点。"""
 
 import json
+import os
 import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -392,6 +394,39 @@ class TestAPI:
         r = client.get("/events?limit=10")
         assert r.status_code == 200
         assert any(e["kind"] in ("ensure", "rebuild") for e in r.json())
+
+    def test_metrics_endpoint(self, tmp_path):
+        fake = FakeLLM([ADD_SKILL, {"params": {"a": 2, "b": 3}}])
+        client, svc = self._make_app(tmp_path, fake=fake)
+        client.post("/ensure", json={"requirement": "计算 2 加 3 的和"})
+        r = client.get("/metrics")
+        assert r.status_code == 200
+        body = r.text
+        assert "ensure_total_path_generated_ok_1 1" in body
+        assert "generation_duration_seconds_count 1" in body
+        assert "breaker_trips_total" not in body  # 未发生熔断
+
+    def test_async_ensure_job_lifecycle(self, tmp_path):
+        fake = FakeLLM([ADD_SKILL, {"params": {"a": 2, "b": 3}}])
+        client, _ = self._make_app(tmp_path, fake=fake)
+        sub = client.post("/ensure/async", json={"requirement": "计算 2 加 3 的和"})
+        assert sub.status_code == 200
+        job_id = sub.json()["job_id"]
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            st = client.get(f"/jobs/{job_id}").json()
+            if st["status"] in ("done", "error"):
+                break
+            time.sleep(0.2)
+        assert st["status"] == "done", st
+        assert st["result"]["ok"] is True and st["result"]["output"] == {"sum": 5}
+        assert client.get("/jobs/ghost").status_code == 404
+
+    def test_ui_page(self, tmp_path):
+        client, _ = self._make_app(tmp_path)
+        r = client.get("/ui")
+        assert r.status_code == 200
+        assert "AutoSkill" in r.text and "/health" in r.text
 
     def test_empty_requirement_structured(self, tmp_path):
         client, _ = self._make_app(tmp_path)

@@ -7,14 +7,19 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
 from .agent import Agent
 from .service import AutoSkillService
+from .ui import UI_HTML
 
 logger = logging.getLogger("autoskill.api")
 
@@ -36,6 +41,11 @@ def create_app(service: AutoSkillService | None = None) -> FastAPI:
     svc = service or AutoSkillService()
     rebuild = svc.rebuild()  # 启动即从磁盘+向量库重建注册表
     app = FastAPI(title="AutoSkill", version=__version__, description="面向 Agent 的自进化技能生成与热加载系统")
+
+    # 异步任务：/ensure/async 提交，GET /jobs/{id} 轮询（内存态，重启即清；审计已在 events.jsonl）
+    job_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="autoskill_job")
+    jobs: dict[str, dict] = {}
+    jobs_lock = threading.Lock()
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request, exc):  # pragma: no cover - 兜底路径
@@ -76,6 +86,54 @@ def create_app(service: AutoSkillService | None = None) -> FastAPI:
             logger.exception("agent 失败")
             raise HTTPException(status_code=502, detail=f"agent 调用失败: {e}") from e
         return reply.as_dict()
+
+    @app.get("/metrics")
+    def metrics() -> PlainTextResponse:
+        """Prometheus 文本格式指标（零依赖实现）。"""
+        return PlainTextResponse(svc.metrics.render(), media_type="text/plain; version=0.0.4")
+
+    @app.post("/ensure/async")
+    def ensure_async(req: EnsureRequest) -> dict:
+        """长任务异步化：立即返回 job_id，避免 60s 级生成占用 HTTP 连接。"""
+        job_id = uuid.uuid4().hex[:12]
+        with jobs_lock:
+            jobs[job_id] = {"job_id": job_id, "status": "queued",
+                            "requirement": req.requirement, "submitted_at": time.time()}
+        seen = {"started": False}
+
+        def _run() -> None:
+            if not seen["started"]:
+                seen["started"] = True
+                with jobs_lock:
+                    jobs[job_id]["status"] = "running"
+                    jobs[job_id]["started_at"] = time.time()
+            try:
+                result = svc.ensure(req.requirement).as_dict()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "done"
+                    jobs[job_id]["result"] = result
+                    jobs[job_id]["finished_at"] = time.time()
+            except Exception as e:  # noqa: BLE001
+                with jobs_lock:
+                    jobs[job_id]["status"] = "error"
+                    jobs[job_id]["result"] = {"ok": False, "error": str(e)[:300]}
+                    jobs[job_id]["finished_at"] = time.time()
+
+        job_executor.submit(_run)
+        return {"job_id": job_id, "status": "queued"}
+
+    @app.get("/jobs/{job_id}")
+    def job_status(job_id: str) -> dict:
+        with jobs_lock:
+            job = dict(jobs.get(job_id) or {})
+        if not job:
+            raise HTTPException(status_code=404, detail=f"任务不存在: {job_id}")
+        return job
+
+    @app.get("/ui", response_class=HTMLResponse)
+    def ui() -> HTMLResponse:
+        """Web 调试面板（单文件，零构建）。"""
+        return HTMLResponse(UI_HTML)
 
     @app.get("/health")
     def health() -> dict:
