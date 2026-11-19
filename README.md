@@ -1,5 +1,8 @@
 # AutoSkill：面向 Agent 的自进化技能生成与热加载系统
 
+[![CI](https://github.com/sv8vkwmfr7-create/AutoSkill/actions/workflows/ci.yml/badge.svg)](https://github.com/sv8vkwmfr7-create/AutoSkill/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > 普通 Agent 调用工具；AutoSkill 的 Agent **生产工具**。
 
 <p align="center"><img src="docs/assets/demo.gif" alt="熔断自修复演示" width="640"></p>
