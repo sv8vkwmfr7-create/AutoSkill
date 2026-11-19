@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><title>AutoSkill — 自进化技能系统</title>
+<style>
+:root { --bg:#0f1420; --card:#171e2e; --fg:#dbe2f0; --dim:#8b97ad; --accent:#4f8cff; --ok:#3fb27f; --bad:#e2606c; }
+body { background:var(--bg); color:var(--fg); font-family:"Microsoft YaHei",system-ui,sans-serif; margin:0; padding:32px; max-width:960px; margin-inline:auto; }
+a { color:var(--accent); text-decoration:none; }
+h1,h2,h3 { color:var(--fg); }
+.badge { display:inline-block; padding:2px 10px; border-radius:12px; font-size:12px; margin-right:6px; }
+.card { background:var(--card); border-radius:12px; padding:20px; margin:16px 0; }
+.metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; }
+.metric { background:var(--card); border-radius:12px; padding:16px; text-align:center; }
+.metric .v { font-size:30px; font-weight:700; }
+.metric .l { color:var(--dim); font-size:12px; margin-top:4px; }
+.pass { color:var(--ok); } .fail { color:var(--bad); }
+img { max-width:100%; border-radius:10px; }
+pre, code { background:#0c111c; border-radius:6px; }
+pre { padding:12px; overflow:auto; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th,td { text-align:left; padding:6px 8px; border-bottom:1px solid #232c40; }
+.footer { color:var(--dim); font-size:12px; margin-top:28px; text-align:center; }
+</style></head><body>
+<div style="display:flex;justify-content:space-between;align-items:center">
+<div><b>AutoSkill</b> · 面向 Agent 的自进化技能生成与热加载系统</div>
+<div><a href="https://github.com/sv8vkwmfr7-create/AutoSkill">GitHub</a> · <a href="index.html">首页</a> · <a href="report.html">评测报告</a></div>
+</div>
+<hr style="border-color:#232c40">
+<h1>AutoSkill</h1>
+<p>普通 Agent 调用工具；AutoSkill 的 Agent <b>生产工具</b>——需求未覆盖时 LLM 自动生成工具函数，
+经五层沙箱纵深校验后入库热加载，Agent 无需重启即可调用；技能故障自动熔断、影子验证修复、自动回滚。</p>
+<p><img src="assets/demo.gif" alt="熔断自修复演示"></p>
+<div class="card"><h2>最新评测（45 条冻结评测集 · 2026-11-19 · deepseek-chat）</h2>
+<div class="metrics"><div class="metric"><div class="v pass">93%</div><div class="l">池外生成成功率<br>14/15 · 门槛 85%</div></div><div class="metric"><div class="v pass">100%</div><div class="l">池内路由正确率<br>15/15 · 门槛 90%（含英文用例）</div></div><div class="metric"><div class="v pass">0</div><div class="l">静默失败<br>门槛 0（失败必须显式）</div></div><div class="metric"><div class="v pass">100%</div><div class="l">注入拦截率<br>5/5 · 门槛 100%</div></div></div>
+<p style="font-size:12px;color:var(--dim)">完整逐条明细见 <a href="report.html">评测报告</a>；判分为人工预写冻结期望值（与 LLM 自生成测试隔离）。</p></div>
+<div class="card"><h2>核心能力</h2>
+<ul>
+<li>全链路自动生成：召回 → LLM 终审 → 生成（四层校验 + ≤3 轮自修正）→ 入库热加载 → 调用</li>
+<li>治理闭环：熔断隔离 → 影子验证修复 → 自动回滚 → 自动回退到最近稳定版本</li>
+<li>五层沙箱纵深：AST 白名单 / 受限内建命名空间 / PEP 578 审计钩子 / 内存看门狗 / Docker 可切换</li>
+<li>egress 域名白名单：HTTP 类技能四点校验（操作员拥有出站策略）</li>
+<li>跨语言召回：混合部署（chat 与 embedding 独立配置），英文改述召回中文技能</li>
+</ul></div>
+<div class="footer">本站由 CI 自动构建（eval/report.json → HTML）·
+<a href="https://github.com/sv8vkwmfr7-create/AutoSkill">源码</a> · MIT License</div>
+</body></html>
