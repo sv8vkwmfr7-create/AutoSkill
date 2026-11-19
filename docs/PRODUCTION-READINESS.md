@@ -24,7 +24,7 @@
 | 重启恢复 | selfcheck 第 4 项；注册表对账 22/22、孤儿 0 | ✅ |
 | 批量评测 | `python -m autoskill eval` → 45/45，四指标 100/100/0/100（eval/report.md，TokenHub glm-5.3-flash 实测） | ✅ |
 | 一键自检 | `python -m autoskill selfcheck` 六项 PASS/FAIL，**独立临时池、幂等可反复运行**（连续两轮 6/6 实测） | ✅ |
-| Provider 可移植 | DeepSeek(402 熔断) → TokenHub glm-5.3-flash，仅改 `.env`，评测复跑全绿 | ✅ |
+| Provider 可移植 | DeepSeek(402 故障) → TokenHub glm-5.3-flash → 回切 DeepSeek，全程仅改 `.env`；**Embedding 也独立可配**（chat=DeepSeek / embedding=TokenHub 多语言模型混合部署实测） | ✅ |
 
 ### 2. 可靠性 ✅
 
@@ -66,7 +66,7 @@
 ### 7. 可维护性 ✅
 
 - 测试：**94 项 pytest 全过**、全离线可复现（含并发、事件日志、API、安全加固用例）；CI（windows-latest + Python 3.14）自动执行
-- 冻结评测集（45 条人工期望值）作为回归基线：任何改动 `python -m autoskill eval` 一键对账；已跨两个供应商复跑验证
+- 冻结评测集（**45 条人工期望值，含英文用例**）作为回归基线：任何改动 `python -m autoskill eval` 一键对账；已跨两个供应商、两种 embedding 复跑验证；**跨语言召回已由多语言 embedding 根治（英文 A 组 5/5 通过）**
 - 文档：README（5 分钟复现）/ ARCHITECTURE（含五层安全模型与三个 trade-off）/ qa（12 条）/ DEMO（现场命令）/ DEPLOY（部署运维）/ PRODUCTION-READINESS（本文）
 - 代码分层清晰：路由/生成/注册表/执行器/存储互相通过窄接口耦合，执行器可插拔（local/docker），LLM/Embedding/向量库均可配置切换
 - 质量门禁：CI 集成 ruff 静态检查与 pytest-cov 覆盖率；执行器对比基准脚本（`scripts/bench_executors.py`，local/docker 双后端同需求复跑）

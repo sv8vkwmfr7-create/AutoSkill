@@ -71,6 +71,8 @@ class Settings:
     vector_store: str = "auto"  # auto | chroma | local
     embedding_backend: str = "auto"  # auto | provider | local
     embedding_model: str = ""
+    embedding_base_url: str = ""  # 独立 embedding 端点（默认回落 llm_base_url，支持混合部署）
+    embedding_api_key: str = ""
     top_k: int = 3
     min_candidate_sim: float = 0.06  # 进入 LLM 裁决的候选相似度下限（精度由 LLM 裁决保证）
     dedup_sim: float = 0.92  # 视为同一意图（触发版本升级）的相似度阈值
@@ -109,6 +111,8 @@ class Settings:
             vector_store=_env("AUTOSKILL_VECTOR_STORE", "auto"),
             embedding_backend=_env("AUTOSKILL_EMBEDDING", "auto"),
             embedding_model=_env("AUTOSKILL_EMBEDDING_MODEL", ""),
+            embedding_base_url=_env("AUTOSKILL_EMBEDDING_BASE_URL"),
+            embedding_api_key=_env("AUTOSKILL_EMBEDDING_API_KEY"),
             top_k=_env_int("AUTOSKILL_TOP_K", 3),
             min_candidate_sim=_env_float("AUTOSKILL_MIN_CANDIDATE_SIM", 0.06),
             dedup_sim=_env_float("AUTOSKILL_DEDUP_SIM", 0.92),

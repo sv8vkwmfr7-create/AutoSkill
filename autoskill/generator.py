@@ -41,7 +41,7 @@ GEN_SYSTEM = f"""你是 AutoSkill 系统的技能生成器，为 Agent 生产可
 5. 禁止 eval/exec/compile/open/__import__/input/globals/locals/vars/breakpoint，禁止双下划线属性或名称，禁止相对导入
 6. 禁止任何网络访问、文件读写、子进程、环境变量访问——这是纯计算技能
 7. 能力边界（诚实拒绝）：若需求需要文件/系统访问、子进程、数据库、非 HTTP 协议（如 TCP/WebSocket），或需要访问**任意/无法枚举的域名**，必须输出 {{"reject": true, "reason": "该需求需要XX能力，超出技能边界"}}，严禁编造看似可用实则虚假的实现
-8. tests 至少 3 组，覆盖典型与边界输入；expected 必须与 run 的实际返回结构完全一致（含键名与包装层级）；网络类技能的用例优先覆盖不依赖网络的纯逻辑
+8. tests 至少 3 组，覆盖典型与边界输入；expected 必须与 run 的实际返回结构完全一致（含键名与包装层级）；tests 的 input 必须满足 params Schema 的全部约束（如 min/max、枚举），严禁越界输入；期望值必须是你能可靠验证的（可心算/可直接推导），无法可靠计算的精确值改用 _check 断言；网络类技能的用例优先覆盖不依赖网络的纯逻辑
 9. 随机性输出（随机密码/UUID 等）：tests 的 expected 使用断言对象 {{"_check": {{"type_is": "str", "length_eq": 16, "regex": "^[A-Za-z0-9]+$", "contains_all": ["[A-Z]", "[a-z]", "[0-9]"]}}}}，严禁写具体随机值
 10. impl_code 与 tests 务求精简（impl 通常不超过 60 行、tests 3~5 组），避免输出超长被截断
 11. description 必须覆盖需求的关键动作与对象；若需求含英文术语或参数名（如 max、min、md5、base64），description 必须原样包含它们（用于向量召回）

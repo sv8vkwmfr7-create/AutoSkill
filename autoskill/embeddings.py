@@ -59,14 +59,16 @@ class ProviderEmbedder:
         self.model = model
         import openai
 
+        # 支持混合部署：embedding 可用独立 endpoint/key（如 chat 用 A、embedding 用 B）
         self._client = openai.OpenAI(
-            base_url=settings.llm_base_url or None,
-            api_key=settings.llm_api_key or "EMPTY",
+            base_url=settings.embedding_base_url or settings.llm_base_url or None,
+            api_key=settings.embedding_api_key or settings.llm_api_key or "EMPTY",
             timeout=settings.llm_timeout_s,
         )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        resp = self._client.embeddings.create(model=self.model, input=list(texts))
+        # TokenHub 等部分 provider 仅支持 float 编码（SDK 默认发 base64）
+        resp = self._client.embeddings.create(model=self.model, input=list(texts), encoding_format="float")
         ordered = sorted(resp.data, key=lambda d: d.index)
         return [d.embedding for d in ordered]
 
