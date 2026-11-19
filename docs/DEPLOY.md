@@ -89,7 +89,7 @@ AUTOSKILL_SHOWCASE_TOKEN=your-secret    # 可选：配置后携带 X-Showcase-To
 - 预算从 `events.jsonl` 的 usage 统计当日消耗（跨轮转文件），超限显式 429——费用滥用不可能发生
 - 限流为每 IP 滑动窗口（内存态）；配额与预算均有 Prometheus 指标（`rate_limited_total`）
 - 沙箱侧：五层纵深 + 默认空 egress（公网用户注入的联网技能请求会被评测 C 组同款机制拦截）
-- 静态作品集：CI 自动把 `eval/report.json` 渲染为 GitHub Pages（`site/` → gh-pages 分支）
+- 静态作品集：CI 自动把 `eval/report.json` 渲染为 GitHub Pages 并部署（已上线：<https://sv8vkwmfr7-create.github.io/AutoSkill/>；仓库 Settings→Pages 需指向 gh-pages 分支，首次由 API 自动启用）
 
 ## 运维要点
 

@@ -5,6 +5,8 @@
 
 > 普通 Agent 调用工具；AutoSkill 的 Agent **生产工具**。
 
+> 🌐 **在线作品集**：<https://sv8vkwmfr7-create.github.io/AutoSkill/>（四指标实测卡片 · 评测报告 · 演示动画，CI 自动更新）
+
 <p align="center"><img src="docs/assets/demo.gif" alt="熔断自修复演示" width="640"></p>
 
 <p align="center"><sub>熔断 → 自修复 → 影子验证 → 热替换：技能连续失败自动隔离，同类需求触发 v2 修复，全程无人工干预</sub></p>
